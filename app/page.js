@@ -777,19 +777,19 @@ function createDemoTimeline(date) {
         }
       ]
     },
-    {
-      id: "712020:c08afcd8-824f-4474-bcf3-44da63e81070",
-      name: "Agente 03",
-      avatarUrl: "",
-      issues: [
-        {
-          key: "SD-1427",
-          summary: "Revision de carga de contenidos",
-          status: "Pendiente",
-          url: "https://demo.atlassian.net/browse/SD-1427"
-        }
-      ]
-    },
+    // {
+    //   id: "712020:c08afcd8-824f-4474-bcf3-44da63e81070",
+    //   name: "Agente 03",
+    //   avatarUrl: "",
+    //   issues: [
+    //     {
+    //       key: "SD-1427",
+    //       summary: "Revision de carga de contenidos",
+    //       status: "Pendiente",
+    //       url: "https://demo.atlassian.net/browse/SD-1427"
+    //     }
+    //   ]
+    // },
     {
       id: "712020:97476abb-ce5e-4a94-9c8d-b888798ee3d7",
       name: "Agente 04",
