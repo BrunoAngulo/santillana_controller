@@ -46,6 +46,21 @@ const SLA_RULES = {
     minutes: 180 * 60
   }
 };
+const PENDING_SLA_STATUS_ALIASES = new Set([
+  "en progreso",
+  "en curso",
+  "esperando por el cliente",
+  "esperando por cliente",
+  "abierta",
+  "abierto",
+  "esperando aprobacion",
+  "escalado nivel 3",
+  "escalado a nivel 3",
+  "escalada nivel 3",
+  "escalada a nivel 3",
+  "elevada a editorial",
+  "elevado a editorial"
+]);
 
 const CONTROLLED_AGENTS = [
   {
@@ -365,13 +380,12 @@ async function searchSlaIssues(
   { complexityFieldId } = {}
 ) {
   const projectClause = projectKey ? `project = "${projectKey}" AND ` : "";
-  const workdayStart = `${date} ${formatMinute(TIMELINE_START_MINUTE)}`;
   const cutoff = `${date} ${formatMinute(getTimelineEndMinute(date))}`;
   const fields = getSearchFields(complexityFieldId);
   const issueEntries = [];
 
   for (const agent of CONTROLLED_AGENTS) {
-    const jql = `${projectClause}assignee = "${agent.id}" AND created <= "${cutoff}" AND (resolutiondate is EMPTY OR resolutiondate >= "${workdayStart}") ORDER BY updated ASC`;
+    const jql = `${projectClause}assignee = "${agent.id}" AND created <= "${cutoff}" AND statusCategory != Done ORDER BY updated ASC`;
     const issues = await searchIssuesByJql(
       jiraFetch,
       jql,
@@ -686,6 +700,7 @@ function buildSlaDashboard({
         id: agent.id,
         name: agent.name,
         totalTickets: 0,
+        pendingTickets: 0,
         evaluatedTickets: 0,
         compliantTickets: 0,
         breachedTickets: 0,
@@ -709,11 +724,18 @@ function buildSlaDashboard({
 
     seenIssues.add(`${agentId}:${issue.key}`);
 
+    const statusName = issue.fields?.status?.name || "Sin estado";
+
+    if (!isPendingSlaStatus(statusName)) {
+      continue;
+    }
+
     if (!agentBuckets.has(agentId)) {
       agentBuckets.set(agentId, {
         id: agentId,
         name: agent.name,
         totalTickets: 0,
+        pendingTickets: 0,
         evaluatedTickets: 0,
         compliantTickets: 0,
         breachedTickets: 0,
@@ -725,20 +747,14 @@ function buildSlaDashboard({
     }
 
     const bucket = agentBuckets.get(agentId);
-    const resolutionDate = parseDateOrNull(issue.fields?.resolutiondate);
     const createdDate = parseDateOrNull(issue.fields?.created);
-    const resolvedAtCutoff = resolutionDate && resolutionDate <= cutoff;
-    const endDate = resolvedAtCutoff ? resolutionDate : cutoff;
+    const endDate = cutoff;
     const complexity = getIssueComplexity(issue, complexityField?.id);
     const rule = complexity ? SLA_RULES[complexity.key] : null;
 
     bucket.totalTickets += 1;
-
-    if (resolvedAtCutoff) {
-      bucket.resolvedTickets += 1;
-    } else {
-      bucket.openTickets += 1;
-    }
+    bucket.pendingTickets += 1;
+    bucket.openTickets += 1;
 
     if (!createdDate || !rule) {
       bucket.unknownComplexityTickets += 1;
@@ -755,7 +771,7 @@ function buildSlaDashboard({
       bucket.breachedIssues.push({
         key: issue.key,
         summary: issue.fields?.summary || "Sin resumen",
-        status: issue.fields?.status?.name || "Sin estado",
+        status: statusName,
         url: `${baseUrl}/browse/${issue.key}`,
         agentId: bucket.id,
         agentName: bucket.name,
@@ -763,7 +779,7 @@ function buildSlaDashboard({
         slaHours: rule.hours,
         elapsedHours: roundHours(elapsedMinutes),
         overHours: roundHours(overMinutes),
-        resolved: Boolean(resolvedAtCutoff)
+        resolved: false
       });
     } else {
       bucket.compliantTickets += 1;
@@ -781,6 +797,7 @@ function buildSlaDashboard({
   const totals = agents.reduce(
     (accumulator, agent) => {
       accumulator.totalTickets += agent.totalTickets;
+      accumulator.pendingTickets += agent.pendingTickets;
       accumulator.evaluatedTickets += agent.evaluatedTickets;
       accumulator.compliantTickets += agent.compliantTickets;
       accumulator.breachedTickets += agent.breachedTickets;
@@ -791,6 +808,7 @@ function buildSlaDashboard({
     },
     {
       totalTickets: 0,
+      pendingTickets: 0,
       evaluatedTickets: 0,
       compliantTickets: 0,
       breachedTickets: 0,
@@ -1096,6 +1114,8 @@ function getStatusMeta(value = "") {
     status.includes("esperando por cliente") ||
     status.includes("espera cliente") ||
     status.includes("cliente") ||
+    status.includes("elevada a editorial") ||
+    status.includes("elevado a editorial") ||
     status.includes("en progreso") ||
     status.includes("en curso") ||
     status.includes("in progress") ||
@@ -1148,6 +1168,10 @@ function isWaitingStatus(status) {
   );
 }
 
+function isPendingSlaStatus(value = "") {
+  return PENDING_SLA_STATUS_ALIASES.has(normalizeStatus(value));
+}
+
 function isTrackedTransition(fromStatus, toStatus) {
   if (isClosedStatus(toStatus.normalized)) {
     return false;
@@ -1185,6 +1209,7 @@ function normalizeStatus(value) {
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
     .trim();
 }
 

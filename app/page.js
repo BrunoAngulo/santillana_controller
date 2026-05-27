@@ -33,7 +33,7 @@ const STATUS_LEGEND = [
   },
   {
     color: "#38bdf8",
-    label: "Azul claro: En progreso / Nivel 3 / Cliente"
+    label: "Azul claro: En progreso / Nivel 3 / Cliente / Editorial"
   },
   {
     color: "#16a34a",
@@ -199,9 +199,9 @@ function SlaOverviewPanel({ timeline }) {
         />
         <MetricCard
           icon={<CheckCircle2 size={20} />}
-          label="Tickets evaluados"
-          value={totals.evaluatedTickets || 0}
-          detail={`${totals.openTickets || 0} abiertos - ${totals.resolvedTickets || 0} resueltos`}
+          label="Pendientes totales"
+          value={totals.pendingTickets ?? totals.totalTickets ?? 0}
+          detail={`${totals.evaluatedTickets || 0} con SLA - ${totals.unknownComplexityTickets || 0} sin complejidad`}
         />
         <MetricCard
           icon={<AlertCircle size={20} />}
@@ -244,7 +244,7 @@ function SlaByAgentPanel({ sla }) {
               <div>
                 <h3 className="sla-agent-card__name">{agent.name}</h3>
                 <p className="sla-agent-card__meta">
-                  {agent.evaluatedTickets} evaluados - {agent.breachedTickets} no cumplen
+                  {agent.pendingTickets ?? agent.totalTickets ?? 0} pendientes - {agent.breachedTickets} no cumplen
                 </p>
               </div>
               <strong className={getSlaRateClassName(agent.complianceRate)}>
@@ -1206,6 +1206,8 @@ function getStatusMeta(value = "") {
     status.includes("esperando por cliente") ||
     status.includes("espera cliente") ||
     status.includes("cliente") ||
+    status.includes("elevada a editorial") ||
+    status.includes("elevado a editorial") ||
     status.includes("en progreso") ||
     status.includes("en curso") ||
     status.includes("in progress") ||
@@ -1295,6 +1297,7 @@ function normalizeStatus(value) {
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
     .trim();
 }
 
