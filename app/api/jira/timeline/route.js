@@ -3,7 +3,6 @@ import { NextResponse } from "next/server";
 const MAX_ISSUES = 1000;
 const MAX_ISSUES_PER_AGENT = 350;
 const MAX_CHANGELOGS_PER_ISSUE = 1000;
-const MAX_PARENT_KEYS_PER_SUBTASK_SEARCH = 80;
 const SEARCH_PAGE_SIZE = 100;
 const CHANGELOG_CONCURRENCY = 2;
 const JIRA_RETRY_LIMIT = 4;
@@ -20,9 +19,7 @@ const BASE_SEARCH_FIELDS = [
   "updated",
   "created",
   "resolutiondate",
-  "issuetype",
-  "parent",
-  "subtasks"
+  "issuetype"
 ];
 const STATUS_COLORS = {
   gray: "#94a3b8",
@@ -50,22 +47,6 @@ const SLA_RULES = {
     minutes: 180 * 60
   }
 };
-const PENDING_SLA_STATUS_ALIASES = new Set([
-  "en progreso",
-  "en curso",
-  "esperando por el cliente",
-  "esperando por cliente",
-  "abierta",
-  "abierto",
-  "esperando aprobacion",
-  "escalado nivel 3",
-  "escalado a nivel 3",
-  "escalada nivel 3",
-  "escalada a nivel 3",
-  "elevada a editorial",
-  "elevado a editorial"
-]);
-
 const CONTROLLED_AGENTS = [
   {
     id: "712020:2e1ae55c-6ec1-42b9-be97-5ac308dd80a1",
@@ -384,12 +365,13 @@ async function searchSlaIssues(
   { complexityFieldId } = {}
 ) {
   const projectClause = projectKey ? `project = "${projectKey}" AND ` : "";
+  const workdayStart = `${date} ${formatMinute(TIMELINE_START_MINUTE)}`;
   const cutoff = `${date} ${formatMinute(getTimelineEndMinute(date))}`;
   const fields = getSearchFields(complexityFieldId);
   const issueEntries = [];
 
   for (const agent of CONTROLLED_AGENTS) {
-    const jql = `${projectClause}assignee = "${agent.id}" AND created <= "${cutoff}" AND statusCategory != Done ORDER BY updated ASC`;
+    const jql = `${projectClause}assignee = "${agent.id}" AND created <= "${cutoff}" AND resolutiondate >= "${workdayStart}" AND resolutiondate <= "${cutoff}" AND issuetype NOT IN subTaskIssueTypes() ORDER BY resolutiondate ASC`;
     const issues = await searchIssuesByJql(
       jiraFetch,
       jql,
@@ -403,78 +385,9 @@ async function searchSlaIssues(
         issue
       });
     }
-
-    const subtasks = await searchSubtasksForParentIssues(jiraFetch, {
-      cutoff,
-      fields,
-      issues,
-      projectClause
-    });
-
-    for (const subtask of subtasks) {
-      const subtaskAgent =
-        getControlledAgent(subtask.fields?.assignee?.accountId) || agent;
-
-      issueEntries.push({
-        agent: subtaskAgent,
-        issue: subtask
-      });
-    }
   }
 
   return issueEntries;
-}
-
-async function searchSubtasksForParentIssues(
-  jiraFetch,
-  {
-    cutoff,
-    fields,
-    issues,
-    projectClause
-  }
-) {
-  const parentKeys = getParentIssueKeys(issues);
-  const subtasksByKey = new Map();
-
-  for (const chunk of chunkArray(parentKeys, MAX_PARENT_KEYS_PER_SUBTASK_SEARCH)) {
-    const parentClause = `parent in (${chunk.map(toJqlQuotedValue).join(", ")})`;
-    const jql = `${projectClause}${parentClause} AND created <= "${cutoff}" AND statusCategory != Done ORDER BY updated ASC`;
-    const subtasks = await searchIssuesByJql(
-      jiraFetch,
-      jql,
-      MAX_ISSUES_PER_AGENT,
-      fields
-    );
-
-    addUniqueIssues(subtasksByKey, subtasks);
-  }
-
-  return Array.from(subtasksByKey.values());
-}
-
-function getParentIssueKeys(issues) {
-  return issues
-    .filter((issue) => issue?.key && !isSubtaskIssue(issue))
-    .map((issue) => issue.key);
-}
-
-function isSubtaskIssue(issue) {
-  return Boolean(issue.fields?.issuetype?.subtask || issue.fields?.parent?.key);
-}
-
-function toJqlQuotedValue(value) {
-  return `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-}
-
-function chunkArray(values, size) {
-  const chunks = [];
-
-  for (let index = 0; index < values.length; index += size) {
-    chunks.push(values.slice(index, index + size));
-  }
-
-  return chunks;
 }
 
 function getSearchFields(complexityFieldId) {
@@ -773,7 +686,6 @@ function buildSlaDashboard({
         id: agent.id,
         name: agent.name,
         totalTickets: 0,
-        pendingTickets: 0,
         evaluatedTickets: 0,
         compliantTickets: 0,
         breachedTickets: 0,
@@ -799,16 +711,11 @@ function buildSlaDashboard({
 
     const statusName = issue.fields?.status?.name || "Sin estado";
 
-    if (!isPendingSlaStatus(statusName)) {
-      continue;
-    }
-
     if (!agentBuckets.has(agentId)) {
       agentBuckets.set(agentId, {
         id: agentId,
         name: agent.name,
         totalTickets: 0,
-        pendingTickets: 0,
         evaluatedTickets: 0,
         compliantTickets: 0,
         breachedTickets: 0,
@@ -820,16 +727,16 @@ function buildSlaDashboard({
     }
 
     const bucket = agentBuckets.get(agentId);
+    const resolutionDate = parseDateOrNull(issue.fields?.resolutiondate);
     const createdDate = parseDateOrNull(issue.fields?.created);
-    const endDate = cutoff;
+    const endDate = resolutionDate || cutoff;
     const complexity = getIssueComplexity(issue, complexityField?.id);
     const rule = complexity ? SLA_RULES[complexity.key] : null;
 
     bucket.totalTickets += 1;
-    bucket.pendingTickets += 1;
-    bucket.openTickets += 1;
+    bucket.resolvedTickets += 1;
 
-    if (!createdDate || !rule) {
+    if (!createdDate || !resolutionDate || !rule) {
       bucket.unknownComplexityTickets += 1;
       continue;
     }
@@ -852,7 +759,7 @@ function buildSlaDashboard({
         slaHours: rule.hours,
         elapsedHours: roundHours(elapsedMinutes),
         overHours: roundHours(overMinutes),
-        resolved: false
+        resolved: true
       });
     } else {
       bucket.compliantTickets += 1;
@@ -870,7 +777,6 @@ function buildSlaDashboard({
   const totals = agents.reduce(
     (accumulator, agent) => {
       accumulator.totalTickets += agent.totalTickets;
-      accumulator.pendingTickets += agent.pendingTickets;
       accumulator.evaluatedTickets += agent.evaluatedTickets;
       accumulator.compliantTickets += agent.compliantTickets;
       accumulator.breachedTickets += agent.breachedTickets;
@@ -881,7 +787,6 @@ function buildSlaDashboard({
     },
     {
       totalTickets: 0,
-      pendingTickets: 0,
       evaluatedTickets: 0,
       compliantTickets: 0,
       breachedTickets: 0,
@@ -1239,10 +1144,6 @@ function isWaitingStatus(status) {
     status.includes("pendiente") ||
     status.includes("waiting")
   );
-}
-
-function isPendingSlaStatus(value = "") {
-  return PENDING_SLA_STATUS_ALIASES.has(normalizeStatus(value));
 }
 
 function isTrackedTransition(fromStatus, toStatus) {
