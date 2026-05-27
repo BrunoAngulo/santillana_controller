@@ -371,7 +371,7 @@ async function searchSlaIssues(
   const issueEntries = [];
 
   for (const agent of CONTROLLED_AGENTS) {
-    const jql = `${projectClause}assignee = "${agent.id}" AND created <= "${cutoff}" AND resolutiondate >= "${workdayStart}" AND resolutiondate <= "${cutoff}" AND issuetype NOT IN subTaskIssueTypes() ORDER BY resolutiondate ASC`;
+    const jql = `${projectClause}assignee = "${agent.id}" AND created <= "${cutoff}" AND (resolutiondate is EMPTY OR (resolutiondate >= "${workdayStart}" AND resolutiondate <= "${cutoff}")) AND issuetype NOT IN subTaskIssueTypes() ORDER BY updated ASC`;
     const issues = await searchIssuesByJql(
       jiraFetch,
       jql,
@@ -729,14 +729,20 @@ function buildSlaDashboard({
     const bucket = agentBuckets.get(agentId);
     const resolutionDate = parseDateOrNull(issue.fields?.resolutiondate);
     const createdDate = parseDateOrNull(issue.fields?.created);
-    const endDate = resolutionDate || cutoff;
+    const resolvedAtCutoff = resolutionDate && resolutionDate <= cutoff;
+    const endDate = resolvedAtCutoff ? resolutionDate : cutoff;
     const complexity = getIssueComplexity(issue, complexityField?.id);
     const rule = complexity ? SLA_RULES[complexity.key] : null;
 
     bucket.totalTickets += 1;
-    bucket.resolvedTickets += 1;
 
-    if (!createdDate || !resolutionDate || !rule) {
+    if (resolvedAtCutoff) {
+      bucket.resolvedTickets += 1;
+    } else {
+      bucket.openTickets += 1;
+    }
+
+    if (!createdDate || !rule) {
       bucket.unknownComplexityTickets += 1;
       continue;
     }
@@ -759,7 +765,7 @@ function buildSlaDashboard({
         slaHours: rule.hours,
         elapsedHours: roundHours(elapsedMinutes),
         overHours: roundHours(overMinutes),
-        resolved: true
+        resolved: Boolean(resolvedAtCutoff)
       });
     } else {
       bucket.compliantTickets += 1;

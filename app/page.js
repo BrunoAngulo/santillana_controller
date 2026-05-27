@@ -199,9 +199,9 @@ function SlaOverviewPanel({ timeline }) {
         />
         <MetricCard
           icon={<CheckCircle2 size={20} />}
-          label="Tickets resueltos"
-          value={totals.resolvedTickets || 0}
-          detail={`${totals.evaluatedTickets || 0} con SLA - ${totals.unknownComplexityTickets || 0} sin complejidad`}
+          label="Tickets del corte"
+          value={totals.totalTickets || 0}
+          detail={`${totals.openTickets || 0} abiertos - ${totals.resolvedTickets || 0} resueltos`}
         />
         <MetricCard
           icon={<AlertCircle size={20} />}
@@ -244,7 +244,7 @@ function SlaByAgentPanel({ sla }) {
               <div>
                 <h3 className="sla-agent-card__name">{agent.name}</h3>
                 <p className="sla-agent-card__meta">
-                  {agent.resolvedTickets || 0} resueltos - {agent.breachedTickets} no cumplen
+                  {agent.openTickets || 0} abiertos - {agent.resolvedTickets || 0} resueltos - {agent.breachedTickets} no cumplen
                 </p>
               </div>
               <strong className={getSlaRateClassName(agent.complianceRate)}>
