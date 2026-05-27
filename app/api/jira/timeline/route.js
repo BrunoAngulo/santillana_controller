@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 const MAX_ISSUES = 1000;
 const MAX_ISSUES_PER_AGENT = 350;
 const MAX_CHANGELOGS_PER_ISSUE = 1000;
+const MAX_PARENT_KEYS_PER_SUBTASK_SEARCH = 80;
 const SEARCH_PAGE_SIZE = 100;
 const CHANGELOG_CONCURRENCY = 2;
 const JIRA_RETRY_LIMIT = 4;
@@ -18,7 +19,10 @@ const BASE_SEARCH_FIELDS = [
   "assignee",
   "updated",
   "created",
-  "resolutiondate"
+  "resolutiondate",
+  "issuetype",
+  "parent",
+  "subtasks"
 ];
 const STATUS_COLORS = {
   gray: "#94a3b8",
@@ -399,9 +403,78 @@ async function searchSlaIssues(
         issue
       });
     }
+
+    const subtasks = await searchSubtasksForParentIssues(jiraFetch, {
+      cutoff,
+      fields,
+      issues,
+      projectClause
+    });
+
+    for (const subtask of subtasks) {
+      const subtaskAgent =
+        getControlledAgent(subtask.fields?.assignee?.accountId) || agent;
+
+      issueEntries.push({
+        agent: subtaskAgent,
+        issue: subtask
+      });
+    }
   }
 
   return issueEntries;
+}
+
+async function searchSubtasksForParentIssues(
+  jiraFetch,
+  {
+    cutoff,
+    fields,
+    issues,
+    projectClause
+  }
+) {
+  const parentKeys = getParentIssueKeys(issues);
+  const subtasksByKey = new Map();
+
+  for (const chunk of chunkArray(parentKeys, MAX_PARENT_KEYS_PER_SUBTASK_SEARCH)) {
+    const parentClause = `parent in (${chunk.map(toJqlQuotedValue).join(", ")})`;
+    const jql = `${projectClause}${parentClause} AND created <= "${cutoff}" AND statusCategory != Done ORDER BY updated ASC`;
+    const subtasks = await searchIssuesByJql(
+      jiraFetch,
+      jql,
+      MAX_ISSUES_PER_AGENT,
+      fields
+    );
+
+    addUniqueIssues(subtasksByKey, subtasks);
+  }
+
+  return Array.from(subtasksByKey.values());
+}
+
+function getParentIssueKeys(issues) {
+  return issues
+    .filter((issue) => issue?.key && !isSubtaskIssue(issue))
+    .map((issue) => issue.key);
+}
+
+function isSubtaskIssue(issue) {
+  return Boolean(issue.fields?.issuetype?.subtask || issue.fields?.parent?.key);
+}
+
+function toJqlQuotedValue(value) {
+  return `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+function chunkArray(values, size) {
+  const chunks = [];
+
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
+  }
+
+  return chunks;
 }
 
 function getSearchFields(complexityFieldId) {
