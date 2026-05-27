@@ -12,6 +12,7 @@ const STATUS_FIELD = "status";
 const PERU_TIME_ZONE = "America/Lima";
 const TIMELINE_START_MINUTE = 8 * 60 + 10;
 const TIMELINE_END_MINUTE = 18 * 60;
+const SLA_RESOLVED_CARRYOVER_MINUTE = 17 * 60 + 30;
 const BASE_SEARCH_FIELDS = [
   "summary",
   "status",
@@ -47,6 +48,15 @@ const SLA_RULES = {
     minutes: 180 * 60
   }
 };
+const SLA_OPEN_STATUS_ALIASES = new Set([
+  "abierta",
+  "abierto",
+  "open",
+  "en progreso",
+  "en proceso",
+  "en curso",
+  "in progress"
+]);
 const CONTROLLED_AGENTS = [
   {
     id: "712020:2e1ae55c-6ec1-42b9-be97-5ac308dd80a1",
@@ -365,13 +375,15 @@ async function searchSlaIssues(
   { complexityFieldId } = {}
 ) {
   const projectClause = projectKey ? `project = "${projectKey}" AND ` : "";
-  const workdayStart = `${date} ${formatMinute(TIMELINE_START_MINUTE)}`;
+  const resolvedWindowStart = `${addDays(date, -1)} ${formatMinute(
+    SLA_RESOLVED_CARRYOVER_MINUTE
+  )}`;
   const cutoff = `${date} ${formatMinute(getTimelineEndMinute(date))}`;
   const fields = getSearchFields(complexityFieldId);
   const issueEntries = [];
 
   for (const agent of CONTROLLED_AGENTS) {
-    const jql = `${projectClause}assignee = "${agent.id}" AND created <= "${cutoff}" AND (resolutiondate is EMPTY OR (resolutiondate >= "${workdayStart}" AND resolutiondate <= "${cutoff}")) AND issuetype NOT IN subTaskIssueTypes() ORDER BY updated ASC`;
+    const jql = `${projectClause}assignee = "${agent.id}" AND created <= "${cutoff}" AND (resolutiondate is EMPTY OR (resolutiondate >= "${resolvedWindowStart}" AND resolutiondate <= "${cutoff}")) AND issuetype NOT IN subTaskIssueTypes() ORDER BY updated ASC`;
     const issues = await searchIssuesByJql(
       jiraFetch,
       jql,
@@ -679,6 +691,10 @@ function buildSlaDashboard({
   timelineEndMinute
 }) {
   const cutoff = createPeruDate(date, timelineEndMinute);
+  const resolvedWindowStart = createPeruDate(
+    addDays(date, -1),
+    SLA_RESOLVED_CARRYOVER_MINUTE
+  );
   const agentBuckets = new Map(
     CONTROLLED_AGENTS.map((agent) => [
       agent.id,
@@ -729,14 +745,23 @@ function buildSlaDashboard({
     const bucket = agentBuckets.get(agentId);
     const resolutionDate = parseDateOrNull(issue.fields?.resolutiondate);
     const createdDate = parseDateOrNull(issue.fields?.created);
-    const resolvedAtCutoff = resolutionDate && resolutionDate <= cutoff;
-    const endDate = resolvedAtCutoff ? resolutionDate : cutoff;
+    const resolvedInWindow =
+      resolutionDate &&
+      resolutionDate >= resolvedWindowStart &&
+      resolutionDate <= cutoff;
+    const openForSla = !resolutionDate && isSlaOpenStatus(statusName);
+
+    if (!resolvedInWindow && !openForSla) {
+      continue;
+    }
+
+    const endDate = resolvedInWindow ? resolutionDate : cutoff;
     const complexity = getIssueComplexity(issue, complexityField?.id);
     const rule = complexity ? SLA_RULES[complexity.key] : null;
 
     bucket.totalTickets += 1;
 
-    if (resolvedAtCutoff) {
+    if (resolvedInWindow) {
       bucket.resolvedTickets += 1;
     } else {
       bucket.openTickets += 1;
@@ -765,7 +790,7 @@ function buildSlaDashboard({
         slaHours: rule.hours,
         elapsedHours: roundHours(elapsedMinutes),
         overHours: roundHours(overMinutes),
-        resolved: Boolean(resolvedAtCutoff)
+        resolved: Boolean(resolvedInWindow)
       });
     } else {
       bucket.compliantTickets += 1;
@@ -1150,6 +1175,10 @@ function isWaitingStatus(status) {
     status.includes("pendiente") ||
     status.includes("waiting")
   );
+}
+
+function isSlaOpenStatus(value = "") {
+  return SLA_OPEN_STATUS_ALIASES.has(normalizeStatus(value));
 }
 
 function isTrackedTransition(fromStatus, toStatus) {
