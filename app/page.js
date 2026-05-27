@@ -6,9 +6,12 @@ import {
   AlertCircle,
   ArrowUpDown,
   CalendarDays,
+  CheckCircle2,
   Clock3,
+  Gauge,
   Loader2,
   RefreshCw,
+  ShieldAlert,
   UserRound,
 } from "lucide-react";
 
@@ -140,9 +143,207 @@ function DashboardHeader({
 function Dashboard({ timeline }) {
   return (
     <div className="dashboard-grid dashboard-grid--presentation">
+      <SlaOverviewPanel timeline={timeline} />
+      <SlaByAgentPanel sla={timeline.sla} />
+      <BreachedTicketsPanel sla={timeline.sla} />
       <TimelineChart timeline={timeline} />
       <AgentChangesPanel timeline={timeline} />
     </div>
+  );
+}
+
+function SlaOverviewPanel({ timeline }) {
+  const sla = timeline.sla;
+  const totals = sla?.totals || {};
+  const cutoffTime = formatTimeValue(sla?.cutoff || timeline.generatedAt);
+
+  return (
+    <section className="sla-overview" aria-label="Resumen SLA del dia">
+      <div className="panel-heading">
+        <div>
+          <p className="panel-heading__eyebrow">SLA diario</p>
+          <h2 className="panel-heading__title">Cumplimiento por agentes</h2>
+        </div>
+        <div className="sla-rules" aria-label="Reglas SLA">
+          {(sla?.rules || []).map((rule) => (
+            <span className="sla-rule" key={rule.key}>
+              {rule.label}: {rule.hours} h laborales
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {sla?.complexityFieldError || !sla?.complexityField ? (
+        <div className="sla-warning" role="status">
+          <AlertCircle size={17} />
+          <span>
+            No se detecto el campo de complejidad. Los tickets quedan como
+            pendientes de clasificacion para SLA.
+          </span>
+        </div>
+      ) : null}
+
+      <div className="metrics-panel metrics-panel--sla">
+        <MetricCard
+          icon={<Gauge size={20} />}
+          label="SLA cumple"
+          value={formatPercent(totals.complianceRate)}
+          detail={`${totals.compliantTickets || 0} de ${totals.evaluatedTickets || 0} evaluados`}
+        />
+        <MetricCard
+          icon={<ShieldAlert size={20} />}
+          label="No cumplen"
+          value={totals.breachedTickets || 0}
+          detail={`${formatPercent(totals.breachRate)} fuera de SLA`}
+          variant={totals.breachedTickets > 0 ? "danger" : "success"}
+        />
+        <MetricCard
+          icon={<CheckCircle2 size={20} />}
+          label="Tickets evaluados"
+          value={totals.evaluatedTickets || 0}
+          detail={`${totals.openTickets || 0} abiertos - ${totals.resolvedTickets || 0} resueltos`}
+        />
+        <MetricCard
+          icon={<AlertCircle size={20} />}
+          label="Sin complejidad"
+          value={totals.unknownComplexityTickets || 0}
+          detail={`Corte ${cutoffTime}`}
+          variant={totals.unknownComplexityTickets > 0 ? "warning" : undefined}
+        />
+      </div>
+    </section>
+  );
+}
+
+function SlaByAgentPanel({ sla }) {
+  const agents = useMemo(() => {
+    const agentList = sla?.agents || [];
+
+    return [...agentList].sort(
+      (first, second) =>
+        (second.breachRate ?? -1) - (first.breachRate ?? -1) ||
+        second.breachedTickets - first.breachedTickets ||
+        first.name.localeCompare(second.name)
+    );
+  }, [sla?.agents]);
+
+  return (
+    <section className="sla-panel" aria-label="SLA por agente">
+      <div className="panel-heading">
+        <div>
+          <p className="panel-heading__eyebrow">SLA por agente</p>
+          <h2 className="panel-heading__title">% cumple / no cumple</h2>
+        </div>
+        <Clock3 size={20} />
+      </div>
+
+      <div className="sla-agent-grid">
+        {agents.map((agent) => (
+          <article className="sla-agent-card" key={agent.id}>
+            <div className="sla-agent-card__top">
+              <div>
+                <h3 className="sla-agent-card__name">{agent.name}</h3>
+                <p className="sla-agent-card__meta">
+                  {agent.evaluatedTickets} evaluados - {agent.breachedTickets} no cumplen
+                </p>
+              </div>
+              <strong className={getSlaRateClassName(agent.complianceRate)}>
+                {formatPercent(agent.complianceRate)}
+              </strong>
+            </div>
+            <div
+              className="sla-bar"
+              aria-label={`SLA de ${agent.name}: ${formatPercent(agent.complianceRate)}`}
+            >
+              <span
+                className="sla-bar__fill"
+                style={{
+                  "--sla-fill": `${agent.complianceRate ?? 0}%`
+                }}
+              />
+            </div>
+            <dl className="sla-agent-card__stats">
+              <div>
+                <dt>Cumple</dt>
+                <dd>{agent.compliantTickets}</dd>
+              </div>
+              <div>
+                <dt>No cumple</dt>
+                <dd>{formatPercent(agent.breachRate)}</dd>
+              </div>
+              <div>
+                <dt>Sin complejidad</dt>
+                <dd>{agent.unknownComplexityTickets}</dd>
+              </div>
+            </dl>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function BreachedTicketsPanel({ sla }) {
+  const breachedIssues = sla?.breachedIssues || [];
+
+  return (
+    <section className="sla-panel" aria-label="Tickets que no cumplen SLA">
+      <div className="panel-heading">
+        <div>
+          <p className="panel-heading__eyebrow">Fuera de SLA</p>
+          <h2 className="panel-heading__title">Tickets que requieren atencion</h2>
+        </div>
+        <ShieldAlert size={20} />
+      </div>
+
+      {breachedIssues.length === 0 ? (
+        <div className="empty-state empty-state--success">
+          <CheckCircle2 size={22} />
+          <span>No hay tickets fuera de SLA en el corte actual</span>
+        </div>
+      ) : (
+        <div className="status-table-wrap">
+          <table className="status-table status-table--sla">
+            <thead>
+              <tr>
+                <th scope="col">Ticket</th>
+                <th scope="col">Agente</th>
+                <th scope="col">Complejidad</th>
+                <th scope="col">SLA</th>
+                <th scope="col">Exceso</th>
+                <th scope="col">Estado</th>
+              </tr>
+            </thead>
+            <tbody>
+              {breachedIssues.map((issue) => (
+                <tr key={`${issue.agentId}-${issue.key}`}>
+                  <td>
+                    <a
+                      className="status-table__ticket"
+                      href={issue.url}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      <span className="status-table__key">{issue.key}</span>
+                      <span className="status-table__summary">{issue.summary}</span>
+                    </a>
+                  </td>
+                  <td>{issue.agentName}</td>
+                  <td>{issue.complexity}</td>
+                  <td>{formatHours(issue.elapsedHours)} / {issue.slaHours} h</td>
+                  <td>
+                    <span className="sla-overdue">
+                      +{formatHours(issue.overHours)}
+                    </span>
+                  </td>
+                  <td>{issue.resolved ? "Resuelto" : issue.status}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -307,18 +508,25 @@ function AgentChangesPanel({ timeline }) {
   );
 }
 
-function MetricCard({ icon, label, value }) {
+function MetricCard({ detail, icon, label, value, variant }) {
   return (
-    <article className="metric-card">
+    <article className={getMetricCardClassName(variant)}>
       <div className="metric-card__icon" aria-hidden="true">
         {icon}
       </div>
       <div>
         <p className="metric-card__label">{label}</p>
         <strong className="metric-card__value">{value}</strong>
+        {detail ? <span className="metric-card__detail">{detail}</span> : null}
       </div>
     </article>
   );
+}
+
+function getMetricCardClassName(variant) {
+  return ["metric-card", variant ? `metric-card--${variant}` : ""]
+    .filter(Boolean)
+    .join(" ");
 }
 
 function sortAgentEvents(events, sortConfig) {
@@ -391,6 +599,43 @@ function getAriaSort(sortConfig, key) {
   return sortConfig.direction === "asc" ? "ascending" : "descending";
 }
 
+function formatPercent(value) {
+  return value == null ? "Sin datos" : `${value}%`;
+}
+
+function formatHours(value) {
+  if (value == null) {
+    return "Sin datos";
+  }
+
+  return Number.isInteger(value) ? `${value} h` : `${value.toFixed(1)} h`;
+}
+
+function formatTimeValue(value) {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "--:--";
+  }
+
+  return new Intl.DateTimeFormat("es-PE", {
+    hour: "2-digit",
+    hourCycle: "h23",
+    minute: "2-digit",
+    timeZone: PERU_TIME_ZONE
+  }).format(date);
+}
+
+function getSlaRateClassName(value) {
+  return [
+    "sla-rate",
+    value == null ? "sla-rate--empty" : "",
+    value != null && value < 80 ? "sla-rate--risk" : ""
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
 function TimelineChart({ timeline }) {
   const [zoomId, setZoomId] = useState(DEFAULT_ZOOM_ID);
   const [focusedIssueKey, setFocusedIssueKey] = useState(null);
@@ -457,8 +702,8 @@ function TimelineChart({ timeline }) {
         className={selectedZoom.fit ? "timeline timeline--fit" : "timeline"}
         style={{
           "--tick-count": ticks.length,
-          "--tick-step-width": `${tickStepWidth}px`,
-          "--track-width": `${trackWidth}px`
+          "--tick-step-width": tickStepWidth,
+          "--track-width": trackWidth
         }}
       >
         <div className="timeline__axis">
@@ -486,7 +731,7 @@ function TimelineChart({ timeline }) {
                 <div className="timeline__agent-text">
                   <strong className="timeline__agent-name">{agent.name}</strong>
                   <span className="timeline__agent-meta">
-                    {agent.statusChangeCount} estados · {agent.cadenceLabel} ·{" "}
+                    {agent.statusChangeCount} estados - {agent.cadenceLabel} -{" "}
                     {agent.issues.length} tickets
                   </span>
                 </div>
@@ -526,14 +771,14 @@ function TimelineChart({ timeline }) {
                       "--event-delay": `${agentIndex * 90 + eventIndex * 45}ms`
                     }}
                     target="_blank"
-                    title={`${event.time} · ${event.issueKey} · ${event.from} > ${event.to}`}
+                    title={`${event.time} - ${event.issueKey} - ${event.from} > ${event.to}`}
                   >
                     <span className="timeline__tooltip">
                       <strong>
-                        {event.time} · {event.issueKey}
+                        {event.time} - {event.issueKey}
                       </strong>
                       <span className="timeline__status-flow">
-                        {event.from} → {event.to}
+                        {event.from} {"->"} {event.to}
                       </span>
                       <small>{event.summary}</small>
                     </span>
@@ -777,19 +1022,19 @@ function createDemoTimeline(date) {
         }
       ]
     },
-    // {
-    //   id: "712020:c08afcd8-824f-4474-bcf3-44da63e81070",
-    //   name: "Agente 03",
-    //   avatarUrl: "",
-    //   issues: [
-    //     {
-    //       key: "SD-1427",
-    //       summary: "Revision de carga de contenidos",
-    //       status: "Pendiente",
-    //       url: "https://demo.atlassian.net/browse/SD-1427"
-    //     }
-    //   ]
-    // },
+    {
+      id: "712020:c08afcd8-824f-4474-bcf3-44da63e81070",
+      name: "Agente 03",
+      avatarUrl: "",
+      issues: [
+        {
+          key: "SD-1427",
+          summary: "Revision de carga de contenidos",
+          status: "Pendiente",
+          url: "https://demo.atlassian.net/browse/SD-1427"
+        }
+      ]
+    },
     {
       id: "712020:97476abb-ce5e-4a94-9c8d-b888798ee3d7",
       name: "Agente 04",

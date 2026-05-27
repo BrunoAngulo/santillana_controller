@@ -12,11 +12,39 @@ const STATUS_FIELD = "status";
 const PERU_TIME_ZONE = "America/Lima";
 const TIMELINE_START_MINUTE = 8 * 60 + 10;
 const TIMELINE_END_MINUTE = 18 * 60;
+const BASE_SEARCH_FIELDS = [
+  "summary",
+  "status",
+  "assignee",
+  "updated",
+  "created",
+  "resolutiondate"
+];
 const STATUS_COLORS = {
   gray: "#94a3b8",
   blue: "#38bdf8",
   green: "#16a34a",
   other: "#f59e0b"
+};
+const SLA_RULES = {
+  baja: {
+    key: "baja",
+    label: "Baja",
+    hours: 20,
+    minutes: 20 * 60
+  },
+  media: {
+    key: "media",
+    label: "Media",
+    hours: 32,
+    minutes: 32 * 60
+  },
+  alta: {
+    key: "alta",
+    label: "Alta",
+    hours: 180,
+    minutes: 180 * 60
+  }
 };
 
 const CONTROLLED_AGENTS = [
@@ -53,8 +81,15 @@ export async function POST(request) {
     const payload = await request.json();
     const credentials = validatePayload(payload);
     const jira = createJiraClient(credentials);
+    const complexityFieldResult = await fetchComplexityField(jira);
+    const complexityField = complexityFieldResult.field;
 
-    const issues = await searchIssues(jira, credentials);
+    const issues = await searchIssues(jira, credentials, {
+      complexityFieldId: complexityField?.id
+    });
+    const slaIssueEntries = await searchSlaIssues(jira, credentials, {
+      complexityFieldId: complexityField?.id
+    });
     const changelogEntries = await mapWithConcurrency(
       issues,
       CHANGELOG_CONCURRENCY,
@@ -65,7 +100,10 @@ export async function POST(request) {
       baseUrl: credentials.siteUrl,
       date: credentials.date,
       issues,
-      historiesByIssue: changelogEntries
+      historiesByIssue: changelogEntries,
+      slaIssueEntries,
+      complexityField,
+      complexityFieldError: complexityFieldResult.error
     });
 
     return NextResponse.json(timeline);
@@ -184,7 +222,42 @@ function createJiraClient({ siteUrl, email, apiToken }) {
   };
 }
 
-async function searchIssues(jiraFetch, { date, projectKey }) {
+async function fetchComplexityField(jiraFetch) {
+  try {
+    const fields = await callJiraWithRetry(() => jiraFetch("/rest/api/3/field"));
+    const customFields = Array.isArray(fields) ? fields : [];
+    const exactMatch = customFields.find(
+      (field) => normalizeStatus(field.name) === "complejidad"
+    );
+    const partialMatch = customFields.find((field) => {
+      const name = normalizeStatus(field.name);
+
+      return name.includes("complejidad") || name.includes("complexity");
+    });
+    const field = exactMatch || partialMatch || null;
+
+    return {
+      field: field
+        ? {
+            id: field.id,
+            name: field.name
+          }
+        : null,
+      error: null
+    };
+  } catch (error) {
+    return {
+      field: null,
+      error: "No se pudo detectar el campo de complejidad en Jira."
+    };
+  }
+}
+
+async function searchIssues(
+  jiraFetch,
+  { date, projectKey },
+  { complexityFieldId } = {}
+) {
   const projectClause = projectKey ? `project = "${projectKey}" AND ` : "";
   const searchStart = `${date} ${formatMinute(TIMELINE_START_MINUTE)}`;
   const searchEnd = `${date} ${formatMinute(getTimelineEndMinute(date))}`;
@@ -201,14 +274,20 @@ async function searchIssues(jiraFetch, { date, projectKey }) {
       searchStart,
       searchEnd,
       statusClause: exactStatusClause,
-      includeAssigneeHistory: true
+      includeAssigneeHistory: true,
+      complexityFieldId
     });
 
     if (targetedIssues.length > 0) {
       return targetedIssues;
     }
 
-    return await searchIssuesByJql(jiraFetch, exactFallbackJql);
+    return await searchIssuesByJql(
+      jiraFetch,
+      exactFallbackJql,
+      MAX_ISSUES,
+      getSearchFields(complexityFieldId)
+    );
   } catch (error) {
     if (error.status !== 400) {
       throw error;
@@ -220,27 +299,45 @@ async function searchIssues(jiraFetch, { date, projectKey }) {
         searchStart,
         searchEnd,
         statusClause: exactStatusClause,
-        includeAssigneeHistory: false
+        includeAssigneeHistory: false,
+        complexityFieldId
       });
 
       if (assignedIssues.length > 0) {
         return assignedIssues;
       }
 
-      return await searchIssuesByJql(jiraFetch, exactFallbackJql);
+      return await searchIssuesByJql(
+        jiraFetch,
+        exactFallbackJql,
+        MAX_ISSUES,
+        getSearchFields(complexityFieldId)
+      );
     } catch (fallbackError) {
       if (fallbackError.status !== 400) {
         throw fallbackError;
       }
 
-      return searchIssuesByJql(jiraFetch, bufferedFallbackJql);
+      return searchIssuesByJql(
+        jiraFetch,
+        bufferedFallbackJql,
+        MAX_ISSUES,
+        getSearchFields(complexityFieldId)
+      );
     }
   }
 }
 
 async function searchIssuesForAgents(
   jiraFetch,
-  { projectClause, searchStart, searchEnd, statusClause, includeAssigneeHistory }
+  {
+    projectClause,
+    searchStart,
+    searchEnd,
+    statusClause,
+    includeAssigneeHistory,
+    complexityFieldId
+  }
 ) {
   const issuesByKey = new Map();
 
@@ -252,7 +349,8 @@ async function searchIssuesForAgents(
     const issues = await searchIssuesByJql(
       jiraFetch,
       jql,
-      MAX_ISSUES_PER_AGENT
+      MAX_ISSUES_PER_AGENT,
+      getSearchFields(complexityFieldId)
     );
 
     addUniqueIssues(issuesByKey, issues);
@@ -261,7 +359,50 @@ async function searchIssuesForAgents(
   return Array.from(issuesByKey.values()).slice(0, MAX_ISSUES);
 }
 
-async function searchIssuesByJql(jiraFetch, jql, limit = MAX_ISSUES) {
+async function searchSlaIssues(
+  jiraFetch,
+  { date, projectKey },
+  { complexityFieldId } = {}
+) {
+  const projectClause = projectKey ? `project = "${projectKey}" AND ` : "";
+  const workdayStart = `${date} ${formatMinute(TIMELINE_START_MINUTE)}`;
+  const cutoff = `${date} ${formatMinute(getTimelineEndMinute(date))}`;
+  const fields = getSearchFields(complexityFieldId);
+  const issueEntries = [];
+
+  for (const agent of CONTROLLED_AGENTS) {
+    const jql = `${projectClause}assignee = "${agent.id}" AND created <= "${cutoff}" AND (resolutiondate is EMPTY OR resolutiondate >= "${workdayStart}") ORDER BY updated ASC`;
+    const issues = await searchIssuesByJql(
+      jiraFetch,
+      jql,
+      MAX_ISSUES_PER_AGENT,
+      fields
+    );
+
+    for (const issue of issues) {
+      issueEntries.push({
+        agent,
+        issue
+      });
+    }
+  }
+
+  return issueEntries;
+}
+
+function getSearchFields(complexityFieldId) {
+  return [
+    ...BASE_SEARCH_FIELDS,
+    ...(complexityFieldId ? [complexityFieldId] : [])
+  ];
+}
+
+async function searchIssuesByJql(
+  jiraFetch,
+  jql,
+  limit = MAX_ISSUES,
+  fields = BASE_SEARCH_FIELDS
+) {
   const issues = [];
   let nextPageToken;
 
@@ -276,7 +417,7 @@ async function searchIssuesByJql(jiraFetch, jql, limit = MAX_ISSUES) {
       jiraFetch("/rest/api/3/search/jql", {
         method: "POST",
         body: JSON.stringify({
-          fields: ["summary", "status", "assignee", "updated"],
+          fields,
           jql,
           maxResults: Math.min(SEARCH_PAGE_SIZE, remaining),
           nextPageToken
@@ -368,7 +509,15 @@ async function mapWithConcurrency(items, limit, worker) {
   return results;
 }
 
-function buildTimeline({ baseUrl, date, issues, historiesByIssue }) {
+function buildTimeline({
+  baseUrl,
+  date,
+  issues,
+  historiesByIssue,
+  slaIssueEntries,
+  complexityField,
+  complexityFieldError
+}) {
   const timelineEndMinute = getTimelineEndMinute(date);
   const agents = new Map(
     CONTROLLED_AGENTS.map((agent) => [
@@ -488,6 +637,14 @@ function buildTimeline({ baseUrl, date, issues, historiesByIssue }) {
   }
 
   const uniqueIssueKeys = new Set(events.map((event) => event.issueKey));
+  const sla = buildSlaDashboard({
+    baseUrl,
+    complexityField,
+    complexityFieldError,
+    date,
+    issueEntries: slaIssueEntries,
+    timelineEndMinute
+  });
 
   return {
     date,
@@ -507,9 +664,279 @@ function buildTimeline({ baseUrl, date, issues, historiesByIssue }) {
       statusChanges: events.length,
       averageStatusMinutes: getAverage(allIntervals)
     },
+    sla,
     agents: agentList,
     generatedAt: new Date().toISOString()
   };
+}
+
+function buildSlaDashboard({
+  baseUrl,
+  complexityField,
+  complexityFieldError,
+  date,
+  issueEntries,
+  timelineEndMinute
+}) {
+  const cutoff = createPeruDate(date, timelineEndMinute);
+  const agentBuckets = new Map(
+    CONTROLLED_AGENTS.map((agent) => [
+      agent.id,
+      {
+        id: agent.id,
+        name: agent.name,
+        totalTickets: 0,
+        evaluatedTickets: 0,
+        compliantTickets: 0,
+        breachedTickets: 0,
+        unknownComplexityTickets: 0,
+        openTickets: 0,
+        resolvedTickets: 0,
+        breachedIssues: []
+      }
+    ])
+  );
+  const seenIssues = new Set();
+
+  for (const entry of issueEntries || []) {
+    const issue = entry.issue;
+    const agent = entry.agent || getControlledAgent(issue.fields?.assignee?.accountId);
+    const agentId = agent?.id;
+
+    if (!issue?.key || !agentId || seenIssues.has(`${agentId}:${issue.key}`)) {
+      continue;
+    }
+
+    seenIssues.add(`${agentId}:${issue.key}`);
+
+    if (!agentBuckets.has(agentId)) {
+      agentBuckets.set(agentId, {
+        id: agentId,
+        name: agent.name,
+        totalTickets: 0,
+        evaluatedTickets: 0,
+        compliantTickets: 0,
+        breachedTickets: 0,
+        unknownComplexityTickets: 0,
+        openTickets: 0,
+        resolvedTickets: 0,
+        breachedIssues: []
+      });
+    }
+
+    const bucket = agentBuckets.get(agentId);
+    const resolutionDate = parseDateOrNull(issue.fields?.resolutiondate);
+    const createdDate = parseDateOrNull(issue.fields?.created);
+    const resolvedAtCutoff = resolutionDate && resolutionDate <= cutoff;
+    const endDate = resolvedAtCutoff ? resolutionDate : cutoff;
+    const complexity = getIssueComplexity(issue, complexityField?.id);
+    const rule = complexity ? SLA_RULES[complexity.key] : null;
+
+    bucket.totalTickets += 1;
+
+    if (resolvedAtCutoff) {
+      bucket.resolvedTickets += 1;
+    } else {
+      bucket.openTickets += 1;
+    }
+
+    if (!createdDate || !rule) {
+      bucket.unknownComplexityTickets += 1;
+      continue;
+    }
+
+    const elapsedMinutes = getBusinessMinutesBetween(createdDate, endDate);
+    const overMinutes = elapsedMinutes - rule.minutes;
+
+    bucket.evaluatedTickets += 1;
+
+    if (overMinutes > 0) {
+      bucket.breachedTickets += 1;
+      bucket.breachedIssues.push({
+        key: issue.key,
+        summary: issue.fields?.summary || "Sin resumen",
+        status: issue.fields?.status?.name || "Sin estado",
+        url: `${baseUrl}/browse/${issue.key}`,
+        agentId: bucket.id,
+        agentName: bucket.name,
+        complexity: complexity.label,
+        slaHours: rule.hours,
+        elapsedHours: roundHours(elapsedMinutes),
+        overHours: roundHours(overMinutes),
+        resolved: Boolean(resolvedAtCutoff)
+      });
+    } else {
+      bucket.compliantTickets += 1;
+    }
+  }
+
+  const agents = Array.from(agentBuckets.values()).map((agent) => ({
+    ...agent,
+    complianceRate: getRate(agent.compliantTickets, agent.evaluatedTickets),
+    breachRate: getRate(agent.breachedTickets, agent.evaluatedTickets),
+    breachedIssues: agent.breachedIssues.sort(
+      (a, b) => b.overHours - a.overHours || a.key.localeCompare(b.key)
+    )
+  }));
+  const totals = agents.reduce(
+    (accumulator, agent) => {
+      accumulator.totalTickets += agent.totalTickets;
+      accumulator.evaluatedTickets += agent.evaluatedTickets;
+      accumulator.compliantTickets += agent.compliantTickets;
+      accumulator.breachedTickets += agent.breachedTickets;
+      accumulator.unknownComplexityTickets += agent.unknownComplexityTickets;
+      accumulator.openTickets += agent.openTickets;
+      accumulator.resolvedTickets += agent.resolvedTickets;
+      return accumulator;
+    },
+    {
+      totalTickets: 0,
+      evaluatedTickets: 0,
+      compliantTickets: 0,
+      breachedTickets: 0,
+      unknownComplexityTickets: 0,
+      openTickets: 0,
+      resolvedTickets: 0
+    }
+  );
+  const breachedIssues = agents
+    .flatMap((agent) => agent.breachedIssues)
+    .sort((a, b) => b.overHours - a.overHours || a.key.localeCompare(b.key));
+
+  return {
+    cutoff: `${date}T${formatMinute(timelineEndMinute)}:00-05:00`,
+    complexityField,
+    complexityFieldError,
+    rules: Object.values(SLA_RULES),
+    totals: {
+      ...totals,
+      complianceRate: getRate(totals.compliantTickets, totals.evaluatedTickets),
+      breachRate: getRate(totals.breachedTickets, totals.evaluatedTickets)
+    },
+    agents,
+    breachedIssues
+  };
+}
+
+function getIssueComplexity(issue, complexityFieldId) {
+  const fields = issue.fields || {};
+  const value = complexityFieldId ? fields[complexityFieldId] : null;
+  const normalizedValue = normalizeComplexityValue(value);
+
+  return normalizedValue;
+}
+
+function normalizeComplexityValue(value) {
+  const label = readFieldValueText(value);
+  const normalized = normalizeStatus(label);
+
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized.includes("baja") || normalized.includes("low")) {
+    return {
+      key: "baja",
+      label: "Baja",
+      raw: label
+    };
+  }
+
+  if (normalized.includes("media") || normalized.includes("medium")) {
+    return {
+      key: "media",
+      label: "Media",
+      raw: label
+    };
+  }
+
+  if (normalized.includes("alta") || normalized.includes("high")) {
+    return {
+      key: "alta",
+      label: "Alta",
+      raw: label
+    };
+  }
+
+  return null;
+}
+
+function readFieldValueText(value) {
+  if (value == null) {
+    return "";
+  }
+
+  if (typeof value === "string" || typeof value === "number") {
+    return String(value);
+  }
+
+  if (Array.isArray(value)) {
+    return value.map(readFieldValueText).filter(Boolean).join(", ");
+  }
+
+  return (
+    value.value ||
+    value.name ||
+    value.displayName ||
+    value.title ||
+    value.key ||
+    ""
+  );
+}
+
+function parseDateOrNull(value) {
+  const date = new Date(value);
+
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function getBusinessMinutesBetween(startDate, endDate) {
+  if (!startDate || !endDate || endDate <= startDate) {
+    return 0;
+  }
+
+  let currentDate = getPeruDateTimeParts(startDate).date;
+  const endLocalDate = getPeruDateTimeParts(endDate).date;
+  let totalMinutes = 0;
+
+  while (currentDate <= endLocalDate) {
+    if (isBusinessDay(currentDate)) {
+      const windowStart = createPeruDate(currentDate, TIMELINE_START_MINUTE);
+      const windowEnd = createPeruDate(currentDate, TIMELINE_END_MINUTE);
+      const segmentStart = startDate > windowStart ? startDate : windowStart;
+      const segmentEnd = endDate < windowEnd ? endDate : windowEnd;
+
+      if (segmentEnd > segmentStart) {
+        totalMinutes += Math.round((segmentEnd - segmentStart) / 60000);
+      }
+    }
+
+    currentDate = addDays(currentDate, 1);
+  }
+
+  return totalMinutes;
+}
+
+function isBusinessDay(date) {
+  const day = createPeruDate(date, 12 * 60).getUTCDay();
+
+  return day !== 0 && day !== 6;
+}
+
+function createPeruDate(date, minute) {
+  return new Date(`${date}T${formatMinute(minute)}:00-05:00`);
+}
+
+function roundHours(minutes) {
+  return Math.round((minutes / 60) * 10) / 10;
+}
+
+function getRate(value, total) {
+  if (!total) {
+    return null;
+  }
+
+  return Math.round((value / total) * 100);
 }
 
 function ensureAgent(agents, event) {
