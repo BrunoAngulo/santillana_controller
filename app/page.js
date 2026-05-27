@@ -143,9 +143,9 @@ function DashboardHeader({
 function Dashboard({ timeline }) {
   return (
     <div className="dashboard-grid dashboard-grid--presentation">
-      <SlaOverviewPanel timeline={timeline} />
-      <SlaByAgentPanel sla={timeline.sla} />
-      <BreachedTicketsPanel sla={timeline.sla} />
+      {/* <SlaOverviewPanel timeline={timeline} /> */}
+      {/* <SlaByAgentPanel sla={timeline.sla} /> */}
+      {/* <BreachedTicketsPanel sla={timeline.sla} /> */}
       <TimelineChart timeline={timeline} />
       <AgentChangesPanel timeline={timeline} />
     </div>
@@ -1035,19 +1035,19 @@ function createDemoTimeline(date) {
         }
       ]
     },
-    {
-      id: "712020:97476abb-ce5e-4a94-9c8d-b888798ee3d7",
-      name: "Agente 04",
-      avatarUrl: "",
-      issues: [
-        {
-          key: "SD-1431",
-          summary: "Incidencia en sincronizacion",
-          status: "Resuelto",
-          url: "https://demo.atlassian.net/browse/SD-1431"
-        }
-      ]
-    },
+    // {
+    //   id: "712020:97476abb-ce5e-4a94-9c8d-b888798ee3d7",
+    //   name: "Agente 04",
+    //   avatarUrl: "",
+    //   issues: [
+    //     {
+    //       key: "SD-1431",
+    //       summary: "Incidencia en sincronizacion",
+    //       status: "Resuelto",
+    //       url: "https://demo.atlassian.net/browse/SD-1431"
+    //     }
+    //   ]
+    // },
     {
       id: "712020:fde045a6-afdc-419d-8ee5-9f500a4baa87",
       name: "Agente 07",
