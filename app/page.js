@@ -13,12 +13,14 @@ import {
   RefreshCw,
   ShieldAlert,
   UserRound,
+  X,
 } from "lucide-react";
 
 const PERU_TIME_ZONE = "America/Lima";
 const TIMELINE_START_MINUTE = 8 * 60 + 10;
 const TIMELINE_END_MINUTE = 18 * 60;
 const DEFAULT_ZOOM_ID = "day";
+const SLA_SIDEBAR_LIMIT = 7;
 
 const ZOOM_OPTIONS = [
   { fit: true, id: "day", label: "Dia", step: 60 },
@@ -143,11 +145,347 @@ function DashboardHeader({
 function Dashboard({ timeline }) {
   return (
     <div className="dashboard-grid dashboard-grid--presentation">
-      {/* <SlaOverviewPanel timeline={timeline} /> */}
-      {/* <SlaByAgentPanel sla={timeline.sla} /> */}
-      {/* <BreachedTicketsPanel sla={timeline.sla} /> */}
-      <TimelineChart timeline={timeline} />
-      <AgentChangesPanel timeline={timeline} />
+      <div className="dashboard-main">
+        <TimelineChart timeline={timeline} />
+        <AgentSlaSummaryPanel sla={timeline.sla} />
+      </div>
+      <SlaPrioritySidebar sla={timeline.sla} generatedAt={timeline.generatedAt} />
+    </div>
+  );
+}
+
+function SlaPrioritySidebar({ generatedAt, sla }) {
+  const totals = sla?.totals || {};
+  const cutoffTime = formatTimeValue(sla?.cutoff || generatedAt);
+  const upcomingIssues = useMemo(
+    () =>
+      [...(sla?.upcomingIssues || getSlaIssuesByStatus(sla, "risk"))].sort(
+        compareUpcomingSlaIssues
+      ),
+    [sla]
+  );
+  const breachedIssues = useMemo(
+    () =>
+      [...(sla?.breachedIssues || getSlaIssuesByStatus(sla, "breached"))].sort(
+        compareBreachedSlaIssues
+      ),
+    [sla]
+  );
+
+  return (
+    <aside className="sla-priority-sidebar" aria-label="Prioridad SLA">
+      <div className="sla-priority-sidebar__header">
+        <div>
+          <p className="panel-heading__eyebrow">SLA critico</p>
+          <h2 className="panel-heading__title">Prioridad de atencion</h2>
+        </div>
+        <ShieldAlert size={20} />
+      </div>
+
+      <div className="sla-priority-sidebar__metrics">
+        <SlaMiniMetric
+          label="En riesgo"
+          value={totals.riskTickets || 0}
+          variant="warning"
+        />
+        <SlaMiniMetric
+          label="Vencidos"
+          value={totals.breachedTickets || 0}
+          variant={totals.breachedTickets > 0 ? "danger" : "success"}
+        />
+      </div>
+
+      {sla?.complexityFieldError || !sla?.complexityField ? (
+        <div className="sla-warning sla-warning--compact" role="status">
+          <AlertCircle size={16} />
+          <span>Complejidad no detectada para algunos calculos.</span>
+        </div>
+      ) : null}
+
+      <SlaTicketGroup
+        emptyText="Sin tickets proximos a vencer"
+        issues={upcomingIssues}
+        title="Proximos a vencer"
+        tone="warning"
+      />
+      <SlaTicketGroup
+        emptyText="Sin SLA vencidos"
+        issues={breachedIssues}
+        title="SLA vencidos"
+        tone="danger"
+      />
+
+      <p className="sla-priority-sidebar__cutoff">Corte {cutoffTime}</p>
+    </aside>
+  );
+}
+
+function SlaMiniMetric({ label, value, variant }) {
+  return (
+    <div className={`sla-mini-metric sla-mini-metric--${variant}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function SlaTicketGroup({ emptyText, issues, title, tone }) {
+  const visibleIssues = issues.slice(0, SLA_SIDEBAR_LIMIT);
+  const hiddenCount = Math.max(0, issues.length - visibleIssues.length);
+
+  return (
+    <section className="sla-ticket-group" aria-label={title}>
+      <div className="sla-ticket-group__heading">
+        <h3>{title}</h3>
+        <span>{issues.length}</span>
+      </div>
+
+      {visibleIssues.length === 0 ? (
+        <div className="sla-ticket-group__empty">{emptyText}</div>
+      ) : (
+        <div className="sla-ticket-list">
+          {visibleIssues.map((issue) => (
+            <SlaTicketItem
+              issue={issue}
+              key={`${issue.agentId}-${issue.key}-${issue.slaStatus}`}
+              tone={tone}
+            />
+          ))}
+        </div>
+      )}
+
+      {hiddenCount > 0 ? (
+        <span className="sla-ticket-group__more">+{hiddenCount} mas</span>
+      ) : null}
+    </section>
+  );
+}
+
+function SlaTicketItem({ issue, tone }) {
+  return (
+    <a
+      className={`sla-ticket sla-ticket--${tone}`}
+      href={issue.url}
+      rel="noreferrer"
+      target="_blank"
+      title={issue.summary}
+    >
+      <span className="sla-ticket__main">
+        <strong>{issue.key}</strong>
+        <small>{issue.agentName}</small>
+      </span>
+      <span className="sla-ticket__time">{formatSlaIssueTime(issue)}</span>
+    </a>
+  );
+}
+
+function AgentSlaSummaryPanel({ sla }) {
+  const [selectedAgent, setSelectedAgent] = useState(null);
+  const agents = useMemo(() => {
+    const agentList = sla?.agents || [];
+
+    return [...agentList].sort(
+      (first, second) =>
+        second.breachedTickets - first.breachedTickets ||
+        second.riskTickets - first.riskTickets ||
+        (first.complianceRate ?? 101) - (second.complianceRate ?? 101) ||
+        first.name.localeCompare(second.name)
+    );
+  }, [sla?.agents]);
+
+  return (
+    <section className="agent-summary-panel" aria-label="Resumen SLA por agente">
+      <div className="agent-summary-panel__header">
+        <div>
+          <p className="panel-heading__eyebrow">Agentes</p>
+          <h2 className="panel-heading__title">Resumen por agente</h2>
+        </div>
+        <Clock3 size={20} />
+      </div>
+
+      {agents.length === 0 ? (
+        <EmptyState />
+      ) : (
+        <div className="agent-summary-grid">
+          {agents.map((agent) => (
+            <AgentSlaSummaryCard
+              agent={agent}
+              key={agent.id}
+              onSelect={setSelectedAgent}
+            />
+          ))}
+        </div>
+      )}
+
+      {selectedAgent ? (
+        <AgentTicketsModal
+          agent={selectedAgent}
+          onClose={() => setSelectedAgent(null)}
+        />
+      ) : null}
+    </section>
+  );
+}
+
+function AgentSlaSummaryCard({ agent, onSelect }) {
+  return (
+    <button
+      className="agent-summary-card"
+      onClick={() => onSelect(agent)}
+      type="button"
+    >
+      <span className="agent-summary-card__top">
+        <span className="agent-summary-card__identity">
+          <AgentAvatar agent={agent} />
+          <span>
+            <strong className="agent-summary-card__name">{agent.name}</strong>
+            <small className="agent-summary-card__meta">
+              {agent.openTickets || 0} abiertos - {agent.resolvedTickets || 0} resueltos
+            </small>
+          </span>
+        </span>
+        <strong className={getSlaRateClassName(agent.complianceRate)}>
+          {formatPercent(agent.complianceRate)}
+        </strong>
+      </span>
+
+      <span
+        className="sla-bar"
+        aria-label={`SLA de ${agent.name}: ${formatPercent(agent.complianceRate)}`}
+      >
+        <span
+          className="sla-bar__fill"
+          style={{ "--sla-fill": `${agent.complianceRate ?? 0}%` }}
+        />
+      </span>
+
+      <span className="agent-summary-card__stats">
+        <AgentSlaStat label="Total" value={agent.totalTickets || 0} />
+        <AgentSlaStat
+          label="Vencidos"
+          value={agent.breachedTickets || 0}
+          variant="danger"
+        />
+        <AgentSlaStat
+          label="Riesgo"
+          value={agent.riskTickets || 0}
+          variant="warning"
+        />
+        <AgentSlaStat
+          label="OK"
+          value={agent.healthyTickets || 0}
+          variant="success"
+        />
+      </span>
+    </button>
+  );
+}
+
+function AgentSlaStat({ label, value, variant }) {
+  const className = [
+    "agent-sla-stat",
+    variant ? `agent-sla-stat--${variant}` : ""
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  return (
+    <span className={className}>
+      <small>{label}</small>
+      <strong>{value}</strong>
+    </span>
+  );
+}
+
+function AgentTicketsModal({ agent, onClose }) {
+  const issues = agent.issues || [];
+
+  useEffect(() => {
+    function handleKeyDown(event) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [onClose]);
+
+  return (
+    <div className="agent-modal-backdrop" onMouseDown={onClose}>
+      <section
+        aria-labelledby={`agent-modal-${agent.id}`}
+        aria-modal="true"
+        className="agent-modal"
+        onMouseDown={(event) => event.stopPropagation()}
+        role="dialog"
+      >
+        <div className="agent-modal__header">
+          <div>
+            <p className="panel-heading__eyebrow">Detalle SLA</p>
+            <h3 className="agent-modal__title" id={`agent-modal-${agent.id}`}>
+              {agent.name}
+            </h3>
+          </div>
+          <button
+            className="icon-button"
+            onClick={onClose}
+            title="Cerrar"
+            type="button"
+          >
+            <X size={18} />
+          </button>
+        </div>
+
+        {issues.length === 0 ? (
+          <div className="empty-state">
+            <CheckCircle2 size={22} />
+            <span>Sin tickets SLA para el corte actual</span>
+          </div>
+        ) : (
+          <div className="status-table-wrap">
+            <table className="status-table status-table--agent-detail">
+              <thead>
+                <tr>
+                  <th scope="col">Ticket</th>
+                  <th scope="col">SLA</th>
+                  <th scope="col">Tiempo</th>
+                  <th scope="col">Estado</th>
+                </tr>
+              </thead>
+              <tbody>
+                {issues.map((issue) => (
+                  <tr key={`${issue.agentId}-${issue.key}-${issue.slaStatus}`}>
+                    <td>
+                      <a
+                        className="status-table__ticket"
+                        href={issue.url}
+                        rel="noreferrer"
+                        target="_blank"
+                      >
+                        <span className="status-table__key">{issue.key}</span>
+                        <span className="status-table__summary">
+                          {issue.summary}
+                        </span>
+                      </a>
+                    </td>
+                    <td>
+                      <span className={getSlaBadgeClassName(issue.slaStatus)}>
+                        {getSlaStatusLabel(issue.slaStatus)}
+                      </span>
+                    </td>
+                    <td>{formatSlaIssueTime(issue)}</td>
+                    <td>{issue.resolved ? "Resuelto" : issue.status}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
     </div>
   );
 }
@@ -636,6 +974,59 @@ function getSlaRateClassName(value) {
     .join(" ");
 }
 
+function getSlaIssuesByStatus(sla, status) {
+  return (sla?.agents || [])
+    .flatMap((agent) => agent.issues || [])
+    .filter((issue) => issue.slaStatus === status);
+}
+
+function compareUpcomingSlaIssues(first, second) {
+  return (
+    (first.remainingMinutes ?? Number.MAX_SAFE_INTEGER) -
+      (second.remainingMinutes ?? Number.MAX_SAFE_INTEGER) ||
+    compareIssueKeys(first.key, second.key)
+  );
+}
+
+function compareBreachedSlaIssues(first, second) {
+  const firstOver = first.overMinutes ?? (first.overHours ?? 0) * 60;
+  const secondOver = second.overMinutes ?? (second.overHours ?? 0) * 60;
+
+  return secondOver - firstOver || compareIssueKeys(first.key, second.key);
+}
+
+function formatSlaIssueTime(issue) {
+  if (issue.slaStatus === "breached" || (issue.overMinutes ?? 0) > 0) {
+    return `+${formatHours(issue.overHours)}`;
+  }
+
+  if (issue.slaStatus === "unknown") {
+    return "Sin datos";
+  }
+
+  return formatHours(issue.remainingHours);
+}
+
+function getSlaBadgeClassName(status) {
+  return [
+    "sla-badge",
+    status ? `sla-badge--${status}` : ""
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function getSlaStatusLabel(status) {
+  const labels = {
+    breached: "Vencido",
+    risk: "En riesgo",
+    ok: "OK",
+    unknown: "Sin datos"
+  };
+
+  return labels[status] || "Sin datos";
+}
+
 function TimelineChart({ timeline }) {
   const [zoomId, setZoomId] = useState(DEFAULT_ZOOM_ID);
   const [focusedIssueKey, setFocusedIssueKey] = useState(null);
@@ -1035,19 +1426,19 @@ function createDemoTimeline(date) {
         }
       ]
     },
-    // {
-    //   id: "712020:97476abb-ce5e-4a94-9c8d-b888798ee3d7",
-    //   name: "Agente 04",
-    //   avatarUrl: "",
-    //   issues: [
-    //     {
-    //       key: "SD-1431",
-    //       summary: "Incidencia en sincronizacion",
-    //       status: "Resuelto",
-    //       url: "https://demo.atlassian.net/browse/SD-1431"
-    //     }
-    //   ]
-    // },
+    {
+      id: "712020:97476abb-ce5e-4a94-9c8d-b888798ee3d7",
+      name: "Agente 04",
+      avatarUrl: "",
+      issues: [
+        {
+          key: "SD-1431",
+          summary: "Incidencia en sincronizacion",
+          status: "Resuelto",
+          url: "https://demo.atlassian.net/browse/SD-1431"
+        }
+      ]
+    },
     {
       id: "712020:fde045a6-afdc-419d-8ee5-9f500a4baa87",
       name: "Agente 07",

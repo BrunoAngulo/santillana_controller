@@ -13,6 +13,7 @@ const PERU_TIME_ZONE = "America/Lima";
 const TIMELINE_START_MINUTE = 8 * 60 + 10;
 const TIMELINE_END_MINUTE = 18 * 60;
 const SLA_RESOLVED_CARRYOVER_MINUTE = 17 * 60 + 30;
+const SLA_RISK_THRESHOLD_MINUTES = 4 * 60;
 const BASE_SEARCH_FIELDS = [
   "summary",
   "status",
@@ -58,10 +59,14 @@ const SLA_OPEN_STATUS_ALIASES = new Set([
   "in progress"
 ]);
 const CONTROLLED_AGENTS = [
-  {
-    id: "712020:2e1ae55c-6ec1-42b9-be97-5ac308dd80a1",
-    name: "Agente 01"
-  },
+  // {
+  //   id: "712020:2e1ae55c-6ec1-42b9-be97-5ac308dd80a1",
+  //   name: "Agente 01"
+  // },
+  // {
+  //   id: "712020:deaddb4e-d651-4b07-9a85-cb3ed87a7675",
+  //   name: "Agente 02"
+  // },
   {
     id: "712020:c08afcd8-824f-4474-bcf3-44da63e81070",
     name: "Agente 03"
@@ -70,6 +75,10 @@ const CONTROLLED_AGENTS = [
     id: "712020:97476abb-ce5e-4a94-9c8d-b888798ee3d7",
     name: "Agente 04"
   },
+  // {
+  //   id: "712020:2ad69820-b32a-4640-90d7-51e6a22ca685",
+  //   name: "Agente 05"
+  // },
   {
     id: "712020:c8c32caa-8a0b-4c78-8073-646a14c43d03",
     name: "Agente 06"
@@ -100,6 +109,14 @@ export async function POST(request) {
     const slaIssueEntries = await searchSlaIssues(jira, credentials, {
       complexityFieldId: complexityField?.id
     });
+    const slaIssueChangelogEntries = await mapWithConcurrency(
+      getUniqueIssuesFromEntries(slaIssueEntries),
+      CHANGELOG_CONCURRENCY,
+      (issue) => fetchIssueChangelog(jira, issue)
+    );
+    const slaHistoriesByIssue = new Map(
+      slaIssueChangelogEntries.map((entry) => [entry.issue.key, entry.histories])
+    );
     const changelogEntries = await mapWithConcurrency(
       issues,
       CHANGELOG_CONCURRENCY,
@@ -112,6 +129,7 @@ export async function POST(request) {
       issues,
       historiesByIssue: changelogEntries,
       slaIssueEntries,
+      slaHistoriesByIssue,
       complexityField,
       complexityFieldError: complexityFieldResult.error
     });
@@ -452,6 +470,18 @@ function addUniqueIssues(issuesByKey, issues) {
   }
 }
 
+function getUniqueIssuesFromEntries(entries) {
+  const issuesByKey = new Map();
+
+  for (const entry of entries || []) {
+    if (entry.issue?.key && !issuesByKey.has(entry.issue.key)) {
+      issuesByKey.set(entry.issue.key, entry.issue);
+    }
+  }
+
+  return Array.from(issuesByKey.values());
+}
+
 async function fetchIssueChangelog(jiraFetch, issue) {
   const histories = [];
   let startAt = 0;
@@ -527,6 +557,7 @@ function buildTimeline({
   issues,
   historiesByIssue,
   slaIssueEntries,
+  slaHistoriesByIssue,
   complexityField,
   complexityFieldError
 }) {
@@ -655,6 +686,7 @@ function buildTimeline({
     complexityFieldError,
     date,
     issueEntries: slaIssueEntries,
+    slaHistoriesByIssue,
     timelineEndMinute
   });
 
@@ -688,6 +720,7 @@ function buildSlaDashboard({
   complexityFieldError,
   date,
   issueEntries,
+  slaHistoriesByIssue,
   timelineEndMinute
 }) {
   const cutoff = createPeruDate(date, timelineEndMinute);
@@ -698,18 +731,7 @@ function buildSlaDashboard({
   const agentBuckets = new Map(
     CONTROLLED_AGENTS.map((agent) => [
       agent.id,
-      {
-        id: agent.id,
-        name: agent.name,
-        totalTickets: 0,
-        evaluatedTickets: 0,
-        compliantTickets: 0,
-        breachedTickets: 0,
-        unknownComplexityTickets: 0,
-        openTickets: 0,
-        resolvedTickets: 0,
-        breachedIssues: []
-      }
+      createSlaAgentBucket(agent)
     ])
   );
   const seenIssues = new Set();
@@ -728,23 +750,11 @@ function buildSlaDashboard({
     const statusName = issue.fields?.status?.name || "Sin estado";
 
     if (!agentBuckets.has(agentId)) {
-      agentBuckets.set(agentId, {
-        id: agentId,
-        name: agent.name,
-        totalTickets: 0,
-        evaluatedTickets: 0,
-        compliantTickets: 0,
-        breachedTickets: 0,
-        unknownComplexityTickets: 0,
-        openTickets: 0,
-        resolvedTickets: 0,
-        breachedIssues: []
-      });
+      agentBuckets.set(agentId, createSlaAgentBucket(agent));
     }
 
     const bucket = agentBuckets.get(agentId);
     const resolutionDate = parseDateOrNull(issue.fields?.resolutiondate);
-    const createdDate = parseDateOrNull(issue.fields?.created);
     const resolvedInWindow =
       resolutionDate &&
       resolutionDate >= resolvedWindowStart &&
@@ -756,6 +766,12 @@ function buildSlaDashboard({
     }
 
     const endDate = resolvedInWindow ? resolutionDate : cutoff;
+    const slaStartDate = getAgentSlaStartDate({
+      agent,
+      endDate,
+      histories: slaHistoriesByIssue?.get(issue.key) || [],
+      issue
+    });
     const complexity = getIssueComplexity(issue, complexityField?.id);
     const rule = complexity ? SLA_RULES[complexity.key] : null;
 
@@ -767,33 +783,76 @@ function buildSlaDashboard({
       bucket.openTickets += 1;
     }
 
-    if (!createdDate || !rule) {
+    if (!slaStartDate || !rule) {
       bucket.unknownComplexityTickets += 1;
-      continue;
-    }
-
-    const elapsedMinutes = getBusinessMinutesBetween(createdDate, endDate);
-    const overMinutes = elapsedMinutes - rule.minutes;
-
-    bucket.evaluatedTickets += 1;
-
-    if (overMinutes > 0) {
-      bucket.breachedTickets += 1;
-      bucket.breachedIssues.push({
+      bucket.issues.push({
         key: issue.key,
         summary: issue.fields?.summary || "Sin resumen",
         status: statusName,
         url: `${baseUrl}/browse/${issue.key}`,
         agentId: bucket.id,
         agentName: bucket.name,
-        complexity: complexity.label,
-        slaHours: rule.hours,
-        elapsedHours: roundHours(elapsedMinutes),
-        overHours: roundHours(overMinutes),
-        resolved: Boolean(resolvedInWindow)
+        complexity: complexity?.label || "Sin clasificar",
+        slaHours: rule?.hours || null,
+        elapsedHours: null,
+        slaStartedAt: slaStartDate?.toISOString() || null,
+        remainingHours: null,
+        remainingMinutes: null,
+        overHours: null,
+        overMinutes: null,
+        resolved: Boolean(resolvedInWindow),
+        slaStatus: "unknown"
+      });
+      continue;
+    }
+
+    const elapsedMinutes = getBusinessMinutesBetween(slaStartDate, endDate);
+    const overMinutes = elapsedMinutes - rule.minutes;
+    const remainingMinutes = rule.minutes - elapsedMinutes;
+    const baseIssue = {
+      key: issue.key,
+      summary: issue.fields?.summary || "Sin resumen",
+      status: statusName,
+      url: `${baseUrl}/browse/${issue.key}`,
+      agentId: bucket.id,
+      agentName: bucket.name,
+      complexity: complexity.label,
+      slaHours: rule.hours,
+      slaStartedAt: slaStartDate.toISOString(),
+      elapsedHours: roundHours(elapsedMinutes),
+      remainingHours: roundHours(Math.max(0, remainingMinutes)),
+      remainingMinutes: Math.max(0, remainingMinutes),
+      overHours: roundHours(Math.max(0, overMinutes)),
+      overMinutes: Math.max(0, overMinutes),
+      resolved: Boolean(resolvedInWindow)
+    };
+
+    bucket.evaluatedTickets += 1;
+
+    if (overMinutes > 0) {
+      bucket.breachedTickets += 1;
+      bucket.breachedIssues.push({
+        ...baseIssue,
+        slaStatus: "breached"
+      });
+      bucket.issues.push({
+        ...baseIssue,
+        slaStatus: "breached"
+      });
+    } else if (openForSla && remainingMinutes <= SLA_RISK_THRESHOLD_MINUTES) {
+      bucket.compliantTickets += 1;
+      bucket.riskTickets += 1;
+      bucket.issues.push({
+        ...baseIssue,
+        slaStatus: "risk"
       });
     } else {
       bucket.compliantTickets += 1;
+      bucket.healthyTickets += 1;
+      bucket.issues.push({
+        ...baseIssue,
+        slaStatus: "ok"
+      });
     }
   }
 
@@ -801,8 +860,9 @@ function buildSlaDashboard({
     ...agent,
     complianceRate: getRate(agent.compliantTickets, agent.evaluatedTickets),
     breachRate: getRate(agent.breachedTickets, agent.evaluatedTickets),
+    issues: agent.issues.sort(compareSlaIssues),
     breachedIssues: agent.breachedIssues.sort(
-      (a, b) => b.overHours - a.overHours || a.key.localeCompare(b.key)
+      (a, b) => b.overMinutes - a.overMinutes || a.key.localeCompare(b.key)
     )
   }));
   const totals = agents.reduce(
@@ -811,6 +871,8 @@ function buildSlaDashboard({
       accumulator.evaluatedTickets += agent.evaluatedTickets;
       accumulator.compliantTickets += agent.compliantTickets;
       accumulator.breachedTickets += agent.breachedTickets;
+      accumulator.riskTickets += agent.riskTickets;
+      accumulator.healthyTickets += agent.healthyTickets;
       accumulator.unknownComplexityTickets += agent.unknownComplexityTickets;
       accumulator.openTickets += agent.openTickets;
       accumulator.resolvedTickets += agent.resolvedTickets;
@@ -821,6 +883,8 @@ function buildSlaDashboard({
       evaluatedTickets: 0,
       compliantTickets: 0,
       breachedTickets: 0,
+      riskTickets: 0,
+      healthyTickets: 0,
       unknownComplexityTickets: 0,
       openTickets: 0,
       resolvedTickets: 0
@@ -828,7 +892,14 @@ function buildSlaDashboard({
   );
   const breachedIssues = agents
     .flatMap((agent) => agent.breachedIssues)
-    .sort((a, b) => b.overHours - a.overHours || a.key.localeCompare(b.key));
+    .sort((a, b) => b.overMinutes - a.overMinutes || a.key.localeCompare(b.key));
+  const upcomingIssues = agents
+    .flatMap((agent) => agent.issues)
+    .filter((issue) => issue.slaStatus === "risk")
+    .sort(
+      (a, b) =>
+        a.remainingMinutes - b.remainingMinutes || a.key.localeCompare(b.key)
+    );
 
   return {
     cutoff: `${date}T${formatMinute(timelineEndMinute)}:00-05:00`,
@@ -841,8 +912,87 @@ function buildSlaDashboard({
       breachRate: getRate(totals.breachedTickets, totals.evaluatedTickets)
     },
     agents,
+    upcomingIssues,
     breachedIssues
   };
+}
+
+function createSlaAgentBucket(agent) {
+  return {
+    id: agent.id,
+    name: agent.name,
+    totalTickets: 0,
+    evaluatedTickets: 0,
+    compliantTickets: 0,
+    breachedTickets: 0,
+    riskTickets: 0,
+    healthyTickets: 0,
+    unknownComplexityTickets: 0,
+    openTickets: 0,
+    resolvedTickets: 0,
+    issues: [],
+    breachedIssues: []
+  };
+}
+
+function getAgentSlaStartDate({ agent, endDate, histories, issue }) {
+  const createdDate = parseDateOrNull(issue.fields?.created);
+  let assignmentDate = null;
+
+  for (const history of histories || []) {
+    const changedAt = parseDateOrNull(history.created);
+
+    if (!changedAt || changedAt > endDate) {
+      continue;
+    }
+
+    for (const item of history.items || []) {
+      if (item.field !== "assignee") {
+        continue;
+      }
+
+      if (isAssigneeChangeToAgent(item, agent)) {
+        assignmentDate = changedAt;
+      }
+    }
+  }
+
+  return assignmentDate || createdDate;
+}
+
+function isAssigneeChangeToAgent(item, agent) {
+  return (
+    item.to === agent.id ||
+    normalizeStatus(item.toString) === normalizeStatus(agent.name)
+  );
+}
+
+function compareSlaIssues(first, second) {
+  const statusOrder = {
+    breached: 0,
+    risk: 1,
+    unknown: 2,
+    ok: 3
+  };
+  const firstOrder = statusOrder[first.slaStatus] ?? 4;
+  const secondOrder = statusOrder[second.slaStatus] ?? 4;
+
+  if (firstOrder !== secondOrder) {
+    return firstOrder - secondOrder;
+  }
+
+  if (first.slaStatus === "breached") {
+    return second.overMinutes - first.overMinutes || first.key.localeCompare(second.key);
+  }
+
+  if (first.slaStatus === "risk") {
+    return (
+      first.remainingMinutes - second.remainingMinutes ||
+      first.key.localeCompare(second.key)
+    );
+  }
+
+  return first.key.localeCompare(second.key);
 }
 
 function getIssueComplexity(issue, complexityFieldId) {
