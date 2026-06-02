@@ -1159,6 +1159,165 @@ a {
   border-color: #b7ead7;
 }
 
+.resolved-tickets-panel {
+  display: grid;
+  min-width: 0;
+  gap: 16px;
+  padding: 18px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-panel);
+}
+
+.resolved-tickets-panel__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.resolved-tickets-panel__total {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 10px;
+  color: #0f6b4f;
+  background: #e8f8f2;
+  border: 1px solid #b7ead7;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 820;
+  white-space: nowrap;
+}
+
+.resolved-agent-list {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.resolved-agent-group {
+  display: grid;
+  min-width: 0;
+  align-content: start;
+  gap: 8px;
+  padding: 10px;
+  background: #fbfdff;
+  border: 1px solid #e5edf5;
+  border-radius: 8px;
+}
+
+.resolved-agent-group__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.resolved-agent-group__header h3 {
+  overflow: hidden;
+  margin: 0;
+  color: var(--color-text);
+  font-size: 0.9rem;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resolved-agent-group__header span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 8px;
+  color: var(--color-success);
+  background: #e8f8f2;
+  border: 1px solid #b7ead7;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  font-weight: 820;
+}
+
+.resolved-ticket-list {
+  display: grid;
+  gap: 6px;
+}
+
+.resolved-ticket {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  padding: 8px;
+  background: #ffffff;
+  border: 1px solid #e5edf5;
+  border-radius: 8px;
+  transition:
+    border-color 150ms ease,
+    box-shadow 150ms ease;
+}
+
+.resolved-ticket:hover,
+.resolved-ticket:focus-visible {
+  border-color: #bfdbfe;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
+  outline: none;
+}
+
+.resolved-ticket__main {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.resolved-ticket__main strong {
+  overflow: hidden;
+  color: var(--color-primary);
+  font-size: 0.84rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resolved-ticket__main small {
+  overflow: hidden;
+  color: var(--color-muted);
+  font-size: 0.72rem;
+  font-weight: 640;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resolved-ticket__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--color-muted);
+  font-size: 0.72rem;
+  font-weight: 760;
+}
+
+.resolved-ticket__tag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 0 7px;
+  color: #0f3d63;
+  background: #d9ebfb;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 820;
+}
+
+.resolved-agent-group__empty {
+  padding: 10px;
+  color: var(--color-muted);
+  background: #ffffff;
+  border: 1px dashed #bdcddd;
+  border-radius: 8px;
+  font-size: 0.76rem;
+  font-weight: 680;
+}
+
 .timeline-panel {
   grid-column: 1 / -1;
   min-width: 0;
@@ -1891,6 +2050,10 @@ a {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .resolved-agent-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .daily-report-agent {
     grid-template-columns: 104px minmax(0, 1fr) 52px;
   }
@@ -1916,7 +2079,8 @@ a {
   .changes-panel__header,
   .agent-summary-panel__header,
   .agent-modal__header,
-  .daily-report-panel__header {
+  .daily-report-panel__header,
+  .resolved-tickets-panel__header {
     align-items: stretch;
     flex-direction: column;
   }
@@ -1957,6 +2121,7 @@ a {
   }
 
   .daily-report-summary,
+  .resolved-agent-list,
   .agent-summary-grid,
   .sla-agent-grid {
     grid-template-columns: 1fr;
@@ -1980,7 +2145,8 @@ a {
   .sla-panel,
   .sla-priority-sidebar,
   .agent-summary-panel,
-  .daily-report-panel {
+  .daily-report-panel,
+  .resolved-tickets-panel {
     padding: 16px;
   }
 

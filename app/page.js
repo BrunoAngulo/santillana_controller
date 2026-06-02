@@ -5,7 +5,6 @@ import {
   Activity,
   AlertCircle,
   ArrowUpDown,
-  BarChart3,
   CalendarDays,
   CheckCircle2,
   Clock3,
@@ -148,7 +147,7 @@ function Dashboard({ timeline }) {
     <div className="dashboard-grid dashboard-grid--presentation">
       <div className="dashboard-main">
         <TimelineChart timeline={timeline} />
-        <DailyTicketsReportPanel report={timeline.dailyReport} />
+        <ResolvedTicketsByAgentPanel report={timeline.dailyReport} />
       </div>
       {/* <AgentSlaSummaryPanel sla={timeline.sla} /> */}
       {/* <SlaPrioritySidebar sla={timeline.sla} generatedAt={timeline.generatedAt} /> */}
@@ -156,231 +155,78 @@ function Dashboard({ timeline }) {
   );
 }
 
-function DailyTicketsReportPanel({ report }) {
-  const [selectedAgent, setSelectedAgent] = useState(null);
-  const agents = report?.agents || [];
-  const maxAssigned = Math.max(
-    1,
-    ...agents.map(
-      (agent) => (agent.today?.assigned || 0) + (agent.previous?.assigned || 0)
-    )
+function ResolvedTicketsByAgentPanel({ report }) {
+  const agents = useMemo(
+    () =>
+      (report?.agents || []).map((agent) => ({
+        ...agent,
+        resolvedTickets: getResolvedReportTickets(agent)
+      })),
+    [report?.agents]
+  );
+  const totalResolvedTickets = agents.reduce(
+    (total, agent) => total + agent.resolvedTickets.length,
+    0
   );
 
   return (
-    <section className="daily-report-panel" aria-label="Reporte diario de tickets">
-      <div className="daily-report-panel__header">
+    <section
+      className="resolved-tickets-panel"
+      aria-label="Tickets resueltos por agente"
+    >
+      <div className="resolved-tickets-panel__header">
         <div>
-          <p className="panel-heading__eyebrow">Reporte diario de tickets</p>
+          <p className="panel-heading__eyebrow">Tickets resueltos</p>
           <h2 className="panel-heading__title">
             Periodo evaluado: {report?.period?.label || "--"}
           </h2>
         </div>
-        <BarChart3 size={20} />
+        <span className="resolved-tickets-panel__total">
+          {totalResolvedTickets} resueltos
+        </span>
       </div>
 
-      <div className="daily-report-summary">
-        <DailyReportMetric
-          label="Hoy R/A"
-          value={formatRatio(report?.totals?.today)}
-          variant="primary"
-        />
-        <DailyReportMetric
-          label="Previo R/A"
-          value={formatRatio(report?.totals?.previous)}
-          variant="muted"
-        />
-        <DailyReportMetric
-          label="Tickets pendientes"
-          value={report?.totals?.pendingTickets || 0}
-          variant="warning"
-        />
-      </div>
-
-      <div className="daily-report-chart" aria-label="Grafico por agente">
+      <div className="resolved-agent-list">
         {agents.map((agent) => (
-          <button
-            className="daily-report-agent"
-            key={agent.id}
-            onClick={() => setSelectedAgent(agent)}
-            type="button"
-          >
-            <span className="daily-report-agent__name">{agent.name}</span>
-            <span className="daily-report-agent__bars">
-              <span
-                className="daily-report-agent__bar daily-report-agent__bar--today"
-                style={{
-                  "--bar-width": `${getReportBarWidth(agent.today?.assigned, maxAssigned)}%`
-                }}
-              >
-                <span>{formatRatio(agent.today)}</span>
-              </span>
-              <span
-                className="daily-report-agent__bar daily-report-agent__bar--previous"
-                style={{
-                  "--bar-width": `${getReportBarWidth(agent.previous?.assigned, maxAssigned)}%`
-                }}
-              >
-                <span>{formatRatio(agent.previous)}</span>
-              </span>
-            </span>
-            <span className="daily-report-agent__pending">
-              {agent.pendingTickets || 0}
-            </span>
-          </button>
+          <section className="resolved-agent-group" key={agent.id}>
+            <div className="resolved-agent-group__header">
+              <h3>{agent.name}</h3>
+              <span>{agent.resolvedTickets.length}</span>
+            </div>
+
+            {agent.resolvedTickets.length === 0 ? (
+              <div className="resolved-agent-group__empty">
+                Sin tickets resueltos en el periodo
+              </div>
+            ) : (
+              <div className="resolved-ticket-list">
+                {agent.resolvedTickets.map((ticket) => (
+                  <a
+                    className="resolved-ticket"
+                    href={ticket.url}
+                    key={`${agent.id}-${ticket.key}-${ticket.category}`}
+                    rel="noreferrer"
+                    target="_blank"
+                    title={ticket.summary}
+                  >
+                    <span className="resolved-ticket__main">
+                      <strong>{ticket.key}</strong>
+                      <small>{ticket.summary}</small>
+                    </span>
+                    <span className="resolved-ticket__meta">
+                      <span className="resolved-ticket__tag">
+                        {ticket.category === "previous" ? "Previo" : "Hoy"}
+                      </span>
+                      <span>{formatTimeValue(ticket.resolvedAt)}</span>
+                    </span>
+                  </a>
+                ))}
+              </div>
+            )}
+          </section>
         ))}
       </div>
-
-      <div className="status-table-wrap">
-        <table className="status-table status-table--daily-report">
-          <thead>
-            <tr>
-              <th scope="col">Agente</th>
-              <th scope="col">Tickets Hoy</th>
-              <th scope="col">Tickets Previos</th>
-              <th scope="col">Tickets abiertos</th>
-              <th scope="col">En seguimiento</th>
-            </tr>
-          </thead>
-          <tbody>
-            {agents.map((agent) => (
-              <tr key={agent.id}>
-                <td>
-                  <button
-                    className="daily-report-table-agent"
-                    onClick={() => setSelectedAgent(agent)}
-                    type="button"
-                  >
-                    {agent.name}
-                  </button>
-                </td>
-                <td>{formatRatio(agent.today)}</td>
-                <td>{formatRatio(agent.previous)}</td>
-                <td>{agent.openTickets || 0}</td>
-                <td>{agent.followUpTickets || 0}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      {selectedAgent ? (
-        <DailyAgentTicketsModal
-          agent={selectedAgent}
-          onClose={() => setSelectedAgent(null)}
-          periodLabel={report?.period?.label}
-        />
-      ) : null}
     </section>
-  );
-}
-
-function DailyReportMetric({ label, value, variant }) {
-  return (
-    <article className={`daily-report-metric daily-report-metric--${variant}`}>
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </article>
-  );
-}
-
-function DailyAgentTicketsModal({ agent, onClose, periodLabel }) {
-  const tickets = agent.todayTickets || [];
-
-  useEffect(() => {
-    function handleKeyDown(event) {
-      if (event.key === "Escape") {
-        onClose();
-      }
-    }
-
-    window.addEventListener("keydown", handleKeyDown);
-
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [onClose]);
-
-  return (
-    <div className="agent-modal-backdrop" onMouseDown={onClose}>
-      <section
-        aria-labelledby={`daily-agent-modal-${agent.id}`}
-        aria-modal="true"
-        className="agent-modal"
-        onMouseDown={(event) => event.stopPropagation()}
-        role="dialog"
-      >
-        <div className="agent-modal__header">
-          <div>
-            <p className="panel-heading__eyebrow">
-              Tickets de hoy - {periodLabel || "--"}
-            </p>
-            <h3 className="agent-modal__title" id={`daily-agent-modal-${agent.id}`}>
-              {agent.name}
-            </h3>
-          </div>
-          <button
-            className="icon-button"
-            onClick={onClose}
-            title="Cerrar"
-            type="button"
-          >
-            <X size={18} />
-          </button>
-        </div>
-
-        {tickets.length === 0 ? (
-          <div className="empty-state">
-            <CheckCircle2 size={22} />
-            <span>Sin tickets de hoy para este agente</span>
-          </div>
-        ) : (
-          <div className="status-table-wrap">
-            <table className="status-table status-table--agent-detail">
-              <thead>
-                <tr>
-                  <th scope="col">Ticket</th>
-                  <th scope="col">Asignado</th>
-                  <th scope="col">Resultado</th>
-                  <th scope="col">Estado</th>
-                </tr>
-              </thead>
-              <tbody>
-                {tickets.map((ticket) => (
-                  <tr key={`${ticket.agentId}-${ticket.key}`}>
-                    <td>
-                      <a
-                        className="status-table__ticket"
-                        href={ticket.url}
-                        rel="noreferrer"
-                        target="_blank"
-                      >
-                        <span className="status-table__key">{ticket.key}</span>
-                        <span className="status-table__summary">
-                          {ticket.summary}
-                        </span>
-                      </a>
-                    </td>
-                    <td>{formatTimeValue(ticket.assignedAt)}</td>
-                    <td>
-                      <span
-                        className={
-                          ticket.resolved
-                            ? "daily-ticket-result daily-ticket-result--resolved"
-                            : "daily-ticket-result"
-                        }
-                      >
-                        {ticket.resolved ? "Resuelto" : "Abierto"}
-                      </span>
-                    </td>
-                    <td>{ticket.status}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
-    </div>
   );
 }
 
@@ -1171,16 +1017,20 @@ function formatPercent(value) {
   return value == null ? "Sin datos" : `${value}%`;
 }
 
-function formatRatio(value) {
-  return `${value?.resolved || 0} / ${value?.assigned || 0}`;
+function getResolvedReportTickets(agent) {
+  return [
+    ...(agent.todayTickets || []),
+    ...(agent.previousTickets || [])
+  ]
+    .filter((ticket) => ticket.resolved)
+    .sort(compareResolvedReportTickets);
 }
 
-function getReportBarWidth(value, maxValue) {
-  if (!value) {
-    return 3;
-  }
-
-  return Math.max(8, (value / maxValue) * 100);
+function compareResolvedReportTickets(first, second) {
+  return (
+    new Date(first.resolvedAt) - new Date(second.resolvedAt) ||
+    compareIssueKeys(first.key, second.key)
+  );
 }
 
 function formatHours(value) {
