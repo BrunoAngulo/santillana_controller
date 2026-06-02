@@ -1522,25 +1522,25 @@ function getInitials(name) {
 function createDemoTimeline(date) {
   const timelineEndMinute = getTimelineEndMinuteForDate(date);
   const people = [
-    {
-      id: "712020:2e1ae55c-6ec1-42b9-be97-5ac308dd80a1",
-      name: "Agente 01",
-      avatarUrl: "",
-      issues: [
-        {
-          key: "SD-1420",
-          summary: "Validar acceso de docente",
-          status: "En curso",
-          url: "https://demo.atlassian.net/browse/SD-1420"
-        },
-        {
-          key: "SD-1451",
-          summary: "Regularizar solicitud de plataforma",
-          status: "Abierta",
-          url: "https://demo.atlassian.net/browse/SD-1451"
-        }
-      ]
-    },
+    // {
+    //   id: "712020:2e1ae55c-6ec1-42b9-be97-5ac308dd80a1",
+    //   name: "Agente 01",
+    //   avatarUrl: "",
+    //   issues: [
+    //     {
+    //       key: "SD-1420",
+    //       summary: "Validar acceso de docente",
+    //       status: "En curso",
+    //       url: "https://demo.atlassian.net/browse/SD-1420"
+    //     },
+    //     {
+    //       key: "SD-1451",
+    //       summary: "Regularizar solicitud de plataforma",
+    //       status: "Abierta",
+    //       url: "https://demo.atlassian.net/browse/SD-1451"
+    //     }
+    //   ]
+    // },
     {
       id: "712020:c08afcd8-824f-4474-bcf3-44da63e81070",
       name: "Agente 03",
