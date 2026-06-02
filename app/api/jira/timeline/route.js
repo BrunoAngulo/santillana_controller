@@ -15,6 +15,7 @@ const STATUS_FIELD = "status";
 const PERU_TIME_ZONE = "America/Lima";
 const TIMELINE_START_MINUTE = 8 * 60 + 10;
 const TIMELINE_END_MINUTE = 18 * 60;
+const DAILY_REPORT_CUTOFF_MINUTE = 17 * 60 + 30;
 const SLA_RESOLVED_CARRYOVER_MINUTE = 17 * 60 + 30;
 const SLA_RISK_THRESHOLD_MINUTES = 4 * 60;
 const BASE_SEARCH_FIELDS = [
@@ -95,6 +96,13 @@ const CONTROLLED_AGENTS = [
 const CONTROLLED_AGENT_MAP = new Map(
   CONTROLLED_AGENTS.map((agent) => [agent.id, agent])
 );
+const DAILY_REPORT_AGENTS = [
+  {
+    id: "712020:2e1ae55c-6ec1-42b9-be97-5ac308dd80a1",
+    name: "Agente 01"
+  },
+  ...CONTROLLED_AGENTS
+];
 
 export const runtime = "nodejs";
 
@@ -103,17 +111,19 @@ export async function POST(request) {
     const payload = await request.json();
     const credentials = validatePayload(payload);
     const jira = createJiraClient(credentials);
-    const complexityFieldResult = await fetchComplexityField(jira);
-    const complexityField = complexityFieldResult.field;
 
-    const issues = await searchIssues(jira, credentials, {
-      complexityFieldId: complexityField?.id
-    });
-    const slaIssueEntries = await searchSlaIssues(jira, credentials, {
-      complexityFieldId: complexityField?.id
-    });
+    const issues = await searchIssues(jira, credentials);
+    // const complexityFieldResult = await fetchComplexityField(jira);
+    // const complexityField = complexityFieldResult.field;
+    // const slaIssueEntries = await searchSlaIssues(jira, credentials, {
+    //   complexityFieldId: complexityField?.id
+    // });
+    const dailyReportIssueEntries = await searchDailyReportIssues(jira, credentials);
     const changelogEntries = await mapWithConcurrency(
-      getUniqueIssues([...issues, ...getUniqueIssuesFromEntries(slaIssueEntries)]),
+      getUniqueIssues([
+        ...issues,
+        ...getUniqueIssuesFromEntries(dailyReportIssueEntries)
+      ]),
       CHANGELOG_CONCURRENCY,
       (issue) => fetchIssueChangelog(jira, issue)
     );
@@ -129,10 +139,12 @@ export async function POST(request) {
         issue,
         histories: historiesByIssueKey.get(issue.key) || []
       })),
-      slaIssueEntries,
-      slaHistoriesByIssue: historiesByIssueKey,
-      complexityField,
-      complexityFieldError: complexityFieldResult.error
+      dailyReportIssueEntries,
+      dailyReportHistoriesByIssue: historiesByIssueKey
+      // slaIssueEntries,
+      // slaHistoriesByIssue: historiesByIssueKey,
+      // complexityField,
+      // complexityFieldError: complexityFieldResult.error
     });
 
     return NextResponse.json(timeline);
@@ -437,6 +449,35 @@ async function searchSlaIssues(
   return issueEntryGroups.flat();
 }
 
+async function searchDailyReportIssues(jiraFetch, { date, projectKey }) {
+  const projectClause = projectKey ? `project = "${projectKey}" AND ` : "";
+  const period = getDailyReportPeriod(date);
+  const periodStart = formatJiraDateTime(period.start);
+  const periodEnd = formatJiraDateTime(period.end);
+  const issueEntryGroups = await mapWithConcurrency(
+    DAILY_REPORT_AGENTS,
+    SEARCH_CONCURRENCY,
+    async (agent) => {
+      const assigneeClause = `(assignee = "${agent.id}" OR assignee WAS "${agent.id}" DURING ("${periodStart}", "${periodEnd}"))`;
+      const activeClause = `created <= "${periodEnd}" AND (resolutiondate is EMPTY OR resolutiondate >= "${periodStart}")`;
+      const jql = `${projectClause}${assigneeClause} AND ${activeClause} AND issuetype NOT IN subTaskIssueTypes() ORDER BY updated ASC`;
+      const issues = await searchIssuesByJql(
+        jiraFetch,
+        jql,
+        MAX_ISSUES_PER_AGENT,
+        BASE_SEARCH_FIELDS
+      );
+
+      return issues.map((issue) => ({
+        agent,
+        issue
+      }));
+    }
+  );
+
+  return issueEntryGroups.flat();
+}
+
 function getSearchFields(complexityFieldId) {
   return [
     ...BASE_SEARCH_FIELDS,
@@ -627,10 +668,12 @@ function buildTimeline({
   date,
   issues,
   historiesByIssue,
-  slaIssueEntries,
-  slaHistoriesByIssue,
-  complexityField,
-  complexityFieldError
+  dailyReportIssueEntries,
+  dailyReportHistoriesByIssue
+  // slaIssueEntries,
+  // slaHistoriesByIssue,
+  // complexityField,
+  // complexityFieldError
 }) {
   const timelineEndMinute = getTimelineEndMinute(date);
   const agents = new Map(
@@ -751,15 +794,21 @@ function buildTimeline({
   }
 
   const uniqueIssueKeys = new Set(events.map((event) => event.issueKey));
-  const sla = buildSlaDashboard({
+  const dailyReport = buildDailyReport({
     baseUrl,
-    complexityField,
-    complexityFieldError,
     date,
-    issueEntries: slaIssueEntries,
-    slaHistoriesByIssue,
-    timelineEndMinute
+    issueEntries: dailyReportIssueEntries,
+    historiesByIssue: dailyReportHistoriesByIssue
   });
+  // const sla = buildSlaDashboard({
+  //   baseUrl,
+  //   complexityField,
+  //   complexityFieldError,
+  //   date,
+  //   issueEntries: slaIssueEntries,
+  //   slaHistoriesByIssue,
+  //   timelineEndMinute
+  // });
 
   return {
     date,
@@ -779,10 +828,337 @@ function buildTimeline({
       statusChanges: events.length,
       averageStatusMinutes: getAverage(allIntervals)
     },
-    sla,
+    dailyReport,
+    // sla,
     agents: agentList,
     generatedAt: new Date().toISOString()
   };
+}
+
+function buildDailyReport({ baseUrl, date, issueEntries, historiesByIssue }) {
+  const period = getDailyReportPeriod(date);
+  const agentBuckets = new Map(
+    DAILY_REPORT_AGENTS.map((agent) => [agent.id, createDailyReportBucket(agent)])
+  );
+  const seenAgentIssues = new Set();
+
+  for (const entry of issueEntries || []) {
+    const issue = entry.issue;
+    const agent = entry.agent;
+
+    if (!issue?.key || !agent?.id || seenAgentIssues.has(`${agent.id}:${issue.key}`)) {
+      continue;
+    }
+
+    seenAgentIssues.add(`${agent.id}:${issue.key}`);
+
+    const histories = historiesByIssue?.get(issue.key) || [];
+    const assignment = getAgentReportAssignment({
+      agent,
+      histories,
+      issue,
+      period
+    });
+
+    if (!assignment) {
+      continue;
+    }
+
+    if (!agentBuckets.has(agent.id)) {
+      agentBuckets.set(agent.id, createDailyReportBucket(agent));
+    }
+
+    const bucket = agentBuckets.get(agent.id);
+    const currentStatusName = issue.fields?.status?.name || "Sin estado";
+    const statusAtCutoff = getIssueStatusAt(
+      issue,
+      histories,
+      period.end
+    ) || currentStatusName;
+    const resolutionDate = parseDateOrNull(issue.fields?.resolutiondate);
+    const resolvedInPeriod =
+      resolutionDate &&
+      resolutionDate >= period.start &&
+      resolutionDate <= period.end &&
+      isDateWithinIntervals(resolutionDate, assignment.intervals);
+    const category = assignment.fromPrevious ? "previous" : "today";
+    const ticket = {
+      key: issue.key,
+      summary: issue.fields?.summary || "Sin resumen",
+      status: statusAtCutoff,
+      url: `${baseUrl}/browse/${issue.key}`,
+      agentId: bucket.id,
+      agentName: bucket.name,
+      assignedAt: assignment.startedAt.toISOString(),
+      category,
+      resolved: Boolean(resolvedInPeriod),
+      resolvedAt: resolvedInPeriod ? resolutionDate.toISOString() : null
+    };
+
+    if (category === "today") {
+      bucket.today.assigned += 1;
+
+      if (resolvedInPeriod) {
+        bucket.today.resolved += 1;
+      }
+
+      bucket.todayTickets.push(ticket);
+    } else {
+      bucket.previous.assigned += 1;
+
+      if (resolvedInPeriod) {
+        bucket.previous.resolved += 1;
+      }
+
+      bucket.previousTickets.push(ticket);
+    }
+
+    const unresolvedAtCutoff = !resolutionDate || resolutionDate > period.end;
+
+    if (unresolvedAtCutoff && assignment.isAssignedAtCutoff) {
+      if (isReportOpenStatus(statusAtCutoff)) {
+        bucket.openTickets += 1;
+      } else {
+        bucket.followUpTickets += 1;
+      }
+    }
+  }
+
+  const agents = Array.from(agentBuckets.values()).map((agent) => ({
+    ...agent,
+    pendingTickets: agent.openTickets + agent.followUpTickets,
+    todayTickets: agent.todayTickets.sort(compareReportTickets),
+    previousTickets: agent.previousTickets.sort(compareReportTickets)
+  }));
+  const totals = agents.reduce(
+    (accumulator, agent) => {
+      accumulator.today.resolved += agent.today.resolved;
+      accumulator.today.assigned += agent.today.assigned;
+      accumulator.previous.resolved += agent.previous.resolved;
+      accumulator.previous.assigned += agent.previous.assigned;
+      accumulator.openTickets += agent.openTickets;
+      accumulator.followUpTickets += agent.followUpTickets;
+      accumulator.pendingTickets += agent.pendingTickets;
+      return accumulator;
+    },
+    {
+      today: {
+        resolved: 0,
+        assigned: 0
+      },
+      previous: {
+        resolved: 0,
+        assigned: 0
+      },
+      openTickets: 0,
+      followUpTickets: 0,
+      pendingTickets: 0
+    }
+  );
+
+  return {
+    period: {
+      start: period.start.toISOString(),
+      end: period.end.toISOString(),
+      label: formatDailyReportPeriod(period)
+    },
+    totals,
+    agents
+  };
+}
+
+function createDailyReportBucket(agent) {
+  return {
+    id: agent.id,
+    name: agent.name,
+    today: {
+      resolved: 0,
+      assigned: 0
+    },
+    previous: {
+      resolved: 0,
+      assigned: 0
+    },
+    openTickets: 0,
+    followUpTickets: 0,
+    pendingTickets: 0,
+    todayTickets: [],
+    previousTickets: []
+  };
+}
+
+function getAgentReportAssignment({ agent, histories, issue, period }) {
+  const intervals = getAssigneeIntervals(issue, histories);
+  const agentIntervals = intervals.filter(
+    (interval) =>
+      isSameAssignee(interval.assignee, agent) &&
+      doesIntervalIntersectPeriod(interval, period)
+  );
+
+  if (!agentIntervals.length) {
+    return null;
+  }
+
+  const fromPrevious = agentIntervals.some(
+    (interval) =>
+      interval.start < period.start &&
+      (!interval.end || interval.end > period.start)
+  );
+  const startedAt = fromPrevious
+    ? agentIntervals.find(
+        (interval) =>
+          interval.start < period.start &&
+          (!interval.end || interval.end > period.start)
+      ).start
+    : agentIntervals.reduce(
+        (earliest, interval) =>
+          !earliest || interval.start < earliest ? interval.start : earliest,
+        null
+      );
+  const isAssignedAtCutoff = agentIntervals.some(
+    (interval) =>
+      interval.start <= period.end &&
+      (!interval.end || interval.end > period.end)
+  );
+
+  return {
+    fromPrevious,
+    intervals: agentIntervals,
+    isAssignedAtCutoff,
+    startedAt
+  };
+}
+
+function getAssigneeIntervals(issue, histories) {
+  const createdDate = parseDateOrNull(issue.fields?.created) || new Date(0);
+  const changes = [];
+
+  for (const history of histories || []) {
+    const changedAt = parseDateOrNull(history.created);
+
+    if (!changedAt) {
+      continue;
+    }
+
+    for (const item of history.items || []) {
+      if (item.field !== "assignee") {
+        continue;
+      }
+
+      changes.push({
+        at: changedAt,
+        from: {
+          id: item.from || "",
+          name: item.fromString || ""
+        },
+        to: {
+          id: item.to || "",
+          name: item.toString || ""
+        }
+      });
+    }
+  }
+
+  changes.sort((a, b) => a.at - b.at);
+
+  if (!changes.length) {
+    return [
+      {
+        assignee: getUser(issue.fields?.assignee),
+        end: null,
+        start: createdDate
+      }
+    ];
+  }
+
+  const intervals = [];
+  let currentAssignee = changes[0].from;
+  let intervalStart = createdDate;
+
+  for (const change of changes) {
+    if (change.at > intervalStart) {
+      intervals.push({
+        assignee: currentAssignee,
+        end: change.at,
+        start: intervalStart
+      });
+    }
+
+    currentAssignee = change.to;
+    intervalStart = change.at;
+  }
+
+  intervals.push({
+    assignee: currentAssignee,
+    end: null,
+    start: intervalStart
+  });
+
+  return intervals;
+}
+
+function isSameAssignee(assignee, agent) {
+  return (
+    assignee?.id === agent.id ||
+    normalizeStatus(assignee?.name) === normalizeStatus(agent.name)
+  );
+}
+
+function doesIntervalIntersectPeriod(interval, period) {
+  const intervalEnd = interval.end || new Date(8640000000000000);
+
+  return interval.start <= period.end && intervalEnd > period.start;
+}
+
+function isDateWithinIntervals(date, intervals) {
+  return intervals.some((interval) => {
+    const intervalEnd = interval.end || new Date(8640000000000000);
+
+    return date >= interval.start && date <= intervalEnd;
+  });
+}
+
+function isReportOpenStatus(value = "") {
+  const status = normalizeStatus(value);
+
+  return (
+    status.includes("abierta") ||
+    status.includes("abierto") ||
+    status.includes("open")
+  );
+}
+
+function getIssueStatusAt(issue, histories, date) {
+  let status = issue.fields?.status?.name || "";
+  const sortedHistories = [...(histories || [])].sort(
+    (a, b) => new Date(b.created) - new Date(a.created)
+  );
+
+  for (const history of sortedHistories) {
+    const changedAt = parseDateOrNull(history.created);
+
+    if (!changedAt || changedAt <= date) {
+      continue;
+    }
+
+    for (const item of history.items || []) {
+      if (item.field === STATUS_FIELD) {
+        status = item.fromString || status;
+      }
+    }
+  }
+
+  return status;
+}
+
+function compareReportTickets(first, second) {
+  return (
+    new Date(first.assignedAt) - new Date(second.assignedAt) ||
+    first.key.localeCompare(second.key, undefined, {
+      numeric: true,
+      sensitivity: "base"
+    })
+  );
 }
 
 function buildSlaDashboard({
@@ -1169,6 +1545,30 @@ function isBusinessDay(date) {
   const day = createPeruDate(date, 12 * 60).getUTCDay();
 
   return day !== 0 && day !== 6;
+}
+
+function getDailyReportPeriod(date) {
+  return {
+    start: createPeruDate(addDays(date, -1), DAILY_REPORT_CUTOFF_MINUTE),
+    end: createPeruDate(date, DAILY_REPORT_CUTOFF_MINUTE)
+  };
+}
+
+function formatJiraDateTime(date) {
+  const parts = getPeruDateTimeParts(date);
+
+  return `${parts.date} ${parts.hour}:${parts.minute}`;
+}
+
+function formatDailyReportPeriod(period) {
+  return `${formatShortReportDateTime(period.start)} - ${formatShortReportDateTime(period.end)}`;
+}
+
+function formatShortReportDateTime(date) {
+  const parts = getPeruDateTimeParts(date);
+  const [, month, day] = parts.date.match(/^\d{4}-(\d{2})-(\d{2})$/) || [];
+
+  return `${day || "--"}/${month || "--"} ${parts.hour}:${parts.minute}`;
 }
 
 function createPeruDate(date, minute) {
