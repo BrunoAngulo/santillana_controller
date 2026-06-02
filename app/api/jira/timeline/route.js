@@ -4,10 +4,13 @@ const MAX_ISSUES = 1000;
 const MAX_ISSUES_PER_AGENT = 350;
 const MAX_CHANGELOGS_PER_ISSUE = 1000;
 const SEARCH_PAGE_SIZE = 100;
-const CHANGELOG_CONCURRENCY = 2;
+const SEARCH_CONCURRENCY = 4;
+const CHANGELOG_CONCURRENCY = 4;
 const JIRA_RETRY_LIMIT = 4;
 const JIRA_BASE_RETRY_MS = 1500;
 const JIRA_MAX_RETRY_MS = 15000;
+const JIRA_EXPAND_CHANGELOG = "changelog";
+const MAX_ERROR_DETAIL_LENGTH = 500;
 const STATUS_FIELD = "status";
 const PERU_TIME_ZONE = "America/Lima";
 const TIMELINE_START_MINUTE = 8 * 60 + 10;
@@ -109,27 +112,25 @@ export async function POST(request) {
     const slaIssueEntries = await searchSlaIssues(jira, credentials, {
       complexityFieldId: complexityField?.id
     });
-    const slaIssueChangelogEntries = await mapWithConcurrency(
-      getUniqueIssuesFromEntries(slaIssueEntries),
-      CHANGELOG_CONCURRENCY,
-      (issue) => fetchIssueChangelog(jira, issue)
-    );
-    const slaHistoriesByIssue = new Map(
-      slaIssueChangelogEntries.map((entry) => [entry.issue.key, entry.histories])
-    );
     const changelogEntries = await mapWithConcurrency(
-      issues,
+      getUniqueIssues([...issues, ...getUniqueIssuesFromEntries(slaIssueEntries)]),
       CHANGELOG_CONCURRENCY,
       (issue) => fetchIssueChangelog(jira, issue)
+    );
+    const historiesByIssueKey = new Map(
+      changelogEntries.map((entry) => [entry.issue.key, entry.histories])
     );
 
     const timeline = buildTimeline({
       baseUrl: credentials.siteUrl,
       date: credentials.date,
       issues,
-      historiesByIssue: changelogEntries,
+      historiesByIssue: issues.map((issue) => ({
+        issue,
+        histories: historiesByIssueKey.get(issue.key) || []
+      })),
       slaIssueEntries,
-      slaHistoriesByIssue,
+      slaHistoriesByIssue: historiesByIssueKey,
       complexityField,
       complexityFieldError: complexityFieldResult.error
     });
@@ -235,6 +236,16 @@ function createJiraClient({ siteUrl, email, apiToken }) {
 
     const text = await response.text();
     const data = text ? safeJson(text) : null;
+
+    if (text && !data) {
+      throw createHttpError(
+        response.ok ? 502 : response.status,
+        response.ok
+          ? "Jira no devolvio una respuesta JSON."
+          : "Jira respondio con un error.",
+        getTextPreview(text)
+      );
+    }
 
     if (!response.ok) {
       throw createHttpError(
@@ -368,19 +379,25 @@ async function searchIssuesForAgents(
   }
 ) {
   const issuesByKey = new Map();
+  const agentIssueGroups = await mapWithConcurrency(
+    CONTROLLED_AGENTS,
+    SEARCH_CONCURRENCY,
+    (agent) => {
+      const assigneeClause = includeAssigneeHistory
+        ? `(assignee = "${agent.id}" OR assignee WAS "${agent.id}" DURING ("${searchStart}", "${searchEnd}"))`
+        : `assignee = "${agent.id}"`;
+      const jql = `${projectClause}${assigneeClause} AND ${statusClause} ORDER BY updated ASC`;
 
-  for (const agent of CONTROLLED_AGENTS) {
-    const assigneeClause = includeAssigneeHistory
-      ? `(assignee = "${agent.id}" OR assignee WAS "${agent.id}" DURING ("${searchStart}", "${searchEnd}"))`
-      : `assignee = "${agent.id}"`;
-    const jql = `${projectClause}${assigneeClause} AND ${statusClause} ORDER BY updated ASC`;
-    const issues = await searchIssuesByJql(
-      jiraFetch,
-      jql,
-      MAX_ISSUES_PER_AGENT,
-      getSearchFields(complexityFieldId)
-    );
+      return searchIssuesByJql(
+        jiraFetch,
+        jql,
+        MAX_ISSUES_PER_AGENT,
+        getSearchFields(complexityFieldId)
+      );
+    }
+  );
 
+  for (const issues of agentIssueGroups) {
     addUniqueIssues(issuesByKey, issues);
   }
 
@@ -398,26 +415,26 @@ async function searchSlaIssues(
   )}`;
   const cutoff = `${date} ${formatMinute(getTimelineEndMinute(date))}`;
   const fields = getSearchFields(complexityFieldId);
-  const issueEntries = [];
+  const issueEntryGroups = await mapWithConcurrency(
+    CONTROLLED_AGENTS,
+    SEARCH_CONCURRENCY,
+    async (agent) => {
+      const jql = `${projectClause}assignee = "${agent.id}" AND created <= "${cutoff}" AND (resolutiondate is EMPTY OR (resolutiondate >= "${resolvedWindowStart}" AND resolutiondate <= "${cutoff}")) AND issuetype NOT IN subTaskIssueTypes() ORDER BY updated ASC`;
+      const issues = await searchIssuesByJql(
+        jiraFetch,
+        jql,
+        MAX_ISSUES_PER_AGENT,
+        fields
+      );
 
-  for (const agent of CONTROLLED_AGENTS) {
-    const jql = `${projectClause}assignee = "${agent.id}" AND created <= "${cutoff}" AND (resolutiondate is EMPTY OR (resolutiondate >= "${resolvedWindowStart}" AND resolutiondate <= "${cutoff}")) AND issuetype NOT IN subTaskIssueTypes() ORDER BY updated ASC`;
-    const issues = await searchIssuesByJql(
-      jiraFetch,
-      jql,
-      MAX_ISSUES_PER_AGENT,
-      fields
-    );
-
-    for (const issue of issues) {
-      issueEntries.push({
+      return issues.map((issue) => ({
         agent,
         issue
-      });
+      }));
     }
-  }
+  );
 
-  return issueEntries;
+  return issueEntryGroups.flat();
 }
 
 function getSearchFields(complexityFieldId) {
@@ -447,6 +464,7 @@ async function searchIssuesByJql(
       jiraFetch("/rest/api/3/search/jql", {
         method: "POST",
         body: JSON.stringify({
+          expand: JIRA_EXPAND_CHANGELOG,
           fields,
           jql,
           maxResults: Math.min(SEARCH_PAGE_SIZE, remaining),
@@ -482,10 +500,25 @@ function getUniqueIssuesFromEntries(entries) {
   return Array.from(issuesByKey.values());
 }
 
+function getUniqueIssues(issues) {
+  const issuesByKey = new Map();
+
+  for (const issue of issues || []) {
+    if (issue?.key && !issuesByKey.has(issue.key)) {
+      issuesByKey.set(issue.key, issue);
+    }
+  }
+
+  return Array.from(issuesByKey.values());
+}
+
 async function fetchIssueChangelog(jiraFetch, issue) {
-  const histories = [];
-  let startAt = 0;
-  let isLast = false;
+  const expandedChangelog = getExpandedIssueChangelog(issue);
+  const histories = [...(expandedChangelog?.histories || [])];
+  let startAt = expandedChangelog
+    ? expandedChangelog.startAt + expandedChangelog.histories.length
+    : 0;
+  let isLast = Boolean(expandedChangelog?.isComplete);
 
   while (!isLast && histories.length < MAX_CHANGELOGS_PER_ISSUE) {
     const data = await callJiraWithRetry(() =>
@@ -495,16 +528,54 @@ async function fetchIssueChangelog(jiraFetch, issue) {
         )}/changelog?startAt=${startAt}&maxResults=100`
       )
     );
+    const pageHistories = getChangelogHistories(data);
 
-    histories.push(...(data.values || []));
-    isLast = data.isLast || histories.length >= (data.total || 0);
-    startAt += data.maxResults || 100;
+    histories.push(...pageHistories);
+    isLast =
+      data.isLast ||
+      pageHistories.length === 0 ||
+      histories.length >= (data.total || histories.length);
+    startAt += data.maxResults || pageHistories.length || 100;
   }
 
   return {
     issue,
     histories: histories.slice(0, MAX_CHANGELOGS_PER_ISSUE)
   };
+}
+
+function getExpandedIssueChangelog(issue) {
+  const changelog = issue?.changelog;
+
+  if (!changelog) {
+    return null;
+  }
+
+  const histories = getChangelogHistories(changelog);
+  const startAt = Number(changelog.startAt || 0);
+  const total = Number(changelog.total || histories.length);
+  const isComplete =
+    Boolean(changelog.isLast) ||
+    histories.length >= total ||
+    startAt + histories.length >= total;
+
+  return {
+    histories,
+    isComplete,
+    startAt
+  };
+}
+
+function getChangelogHistories(changelog) {
+  if (Array.isArray(changelog?.values)) {
+    return changelog.values;
+  }
+
+  if (Array.isArray(changelog?.histories)) {
+    return changelog.histories;
+  }
+
+  return [];
 }
 
 async function callJiraWithRetry(operation) {
@@ -1423,6 +1494,16 @@ function safeJson(text) {
   }
 }
 
+function getTextPreview(text) {
+  return String(text || "")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_ERROR_DETAIL_LENGTH);
+}
+
 function sleep(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
@@ -1447,7 +1528,7 @@ function getJiraError(data, fallback) {
     return Object.values(data.errors).join(" ");
   }
 
-  return fallback;
+  return getTextPreview(fallback) || fallback;
 }
 
 function createHttpError(status, publicMessage, detail) {

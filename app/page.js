@@ -1271,14 +1271,50 @@ async function fetchTimeline(date) {
       date
     })
   });
-
-  const data = await response.json();
+  const data = await readApiResponse(response);
 
   if (!response.ok) {
     throw new Error(data.message || "Error al consultar Jira.");
   }
 
   return data;
+}
+
+async function readApiResponse(response) {
+  const contentType = response.headers.get("content-type") || "";
+
+  if (contentType.includes("application/json")) {
+    return response.json();
+  }
+
+  const text = await response.text();
+  const message = getNonJsonApiErrorMessage(text, response.status);
+
+  throw new Error(message);
+}
+
+function getNonJsonApiErrorMessage(text, status) {
+  const preview = stripHtml(text);
+
+  if (/inactivity timeout/i.test(preview)) {
+    return "La consulta a Jira demoro demasiado y el servidor corto la conexion. Reintenta o reduce el rango de datos.";
+  }
+
+  if (preview) {
+    return `El servidor respondio con contenido no JSON (${status}): ${preview}`;
+  }
+
+  return `El servidor respondio con contenido no JSON (${status}).`;
+}
+
+function stripHtml(text) {
+  return String(text || "")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 260);
 }
 
 function getTodayInputValue() {
