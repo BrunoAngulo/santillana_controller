@@ -79,10 +79,10 @@ const CONTROLLED_AGENTS = [
     id: "712020:97476abb-ce5e-4a94-9c8d-b888798ee3d7",
     name: "Agente 04"
   },
-  // {
-  //   id: "712020:2ad69820-b32a-4640-90d7-51e6a22ca685",
-  //   name: "Agente 05"
-  // },
+  {
+    id: "712020:2ad69820-b32a-4640-90d7-51e6a22ca685",
+    name: "Agente 05"
+  },
   {
     id: "712020:c8c32caa-8a0b-4c78-8073-646a14c43d03",
     name: "Agente 06"

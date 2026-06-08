@@ -1568,8 +1568,8 @@ function createDemoTimeline(date) {
       ]
     },
     {
-      id: "712020:fde045a6-afdc-419d-8ee5-9f500a4baa87",
-      name: "Agente 07",
+      id: "712020:2ad69820-b32a-4640-90d7-51e6a22ca685",
+      name: "Agente 05",
       avatarUrl: "",
       issues: [
         {
@@ -1579,17 +1579,42 @@ function createDemoTimeline(date) {
           url: "https://demo.atlassian.net/browse/SD-1460"
         }
       ]
+    },
+    {
+      id: "712020:c8c32caa-8a0b-4c78-8073-646a14c43d03",
+      name: "Agente 06",
+      avatarUrl: "",
+      issues: [
+        {
+          key: "SD-1468",
+          summary: "Validar actualizacion de licencia",
+          status: "Abierta",
+          url: "https://demo.atlassian.net/browse/SD-1468"
+        }
+      ]
+    },
+    {
+      id: "712020:fde045a6-afdc-419d-8ee5-9f500a4baa87",
+      name: "Agente 07",
+      avatarUrl: "",
+      issues: [
+        {
+          key: "SD-1472",
+          summary: "Escalar consulta editorial",
+          status: "En progreso",
+          url: "https://demo.atlassian.net/browse/SD-1472"
+        }
+      ]
     }
   ];
 
   const events = [
-    eventFor(date, people[0], "SD-1420", "08:15", "En espera", "Abierta"),
-    eventFor(date, people[0], "SD-1420", "09:10", "Abierta", "En progreso"),
-    eventFor(date, people[0], "SD-1420", "10:40", "En progreso", "Esperando por el cliente"),
-    eventFor(date, people[0], "SD-1451", "11:25", "Abierta", "Resuelta"),
-    eventFor(date, people[1], "SD-1427", "10:05", "Abierta", "Escalado Nivel 3"),
-    eventFor(date, people[2], "SD-1431", "11:35", "Esperando aprobacion", "Escalado Nivel 3"),
-    eventFor(date, people[3], "SD-1460", "17:55", "Esperando aprobacion", "Resuelta")
+    eventFor(date, people[0], "SD-1427", "08:15", "Abierta", "En progreso"),
+    eventFor(date, people[0], "SD-1427", "09:10", "En progreso", "Esperando por el cliente"),
+    eventFor(date, people[1], "SD-1431", "10:05", "Esperando aprobacion", "Escalado Nivel 3"),
+    eventFor(date, people[2], "SD-1460", "11:35", "Abierta", "En revision"),
+    eventFor(date, people[3], "SD-1468", "14:20", "Abierta", "En progreso"),
+    eventFor(date, people[4], "SD-1472", "17:05", "En progreso", "Resuelta")
   ].filter((event) => event && event.minute <= timelineEndMinute);
 
   const grouped = new Map(
