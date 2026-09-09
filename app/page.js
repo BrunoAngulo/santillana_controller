@@ -8,6 +8,7 @@ import {
   CalendarDays,
   CheckCircle2,
   Clock3,
+  Download,
   Gauge,
   Loader2,
   RefreshCw,
@@ -88,9 +89,11 @@ export default function Home() {
     <main className="app-shell app-shell--presentation">
       <DashboardHeader
         date={date}
+        onDownload={() => downloadTimelineExcel(timeline)}
         onDateChange={setDate}
         onRefresh={handleRefresh}
         status={status}
+        timeline={timeline}
       />
 
       {status === "loading" && <LoadingState />}
@@ -102,10 +105,14 @@ export default function Home() {
 
 function DashboardHeader({
   date,
+  onDownload,
   onDateChange,
   onRefresh,
-  status
+  status,
+  timeline
 }) {
+  const canDownload = status === "ready" && Boolean(timeline);
+
   return (
     <header className="dashboard-header">
       <div className="dashboard-header__identity">
@@ -128,6 +135,18 @@ function DashboardHeader({
             value={date}
           />
         </label>
+
+        <button
+          aria-label="Descargar datos en Excel"
+          className="button button--ghost"
+          disabled={!canDownload}
+          onClick={onDownload}
+          title="Descargar Excel"
+          type="button"
+        >
+          <Download size={17} />
+          Excel
+        </button>
 
         <button
           className="icon-button"
@@ -1054,6 +1073,378 @@ function formatTimeValue(value) {
     minute: "2-digit",
     timeZone: PERU_TIME_ZONE
   }).format(date);
+}
+
+function downloadTimelineExcel(timeline) {
+  if (!timeline) {
+    return;
+  }
+
+  const workbook = createExcelWorkbook([
+    {
+      name: "Resumen",
+      rows: getOverviewExportRows(timeline)
+    },
+    {
+      name: "Tickets",
+      rows: getTicketExportRows(timeline)
+    },
+    {
+      name: "Eventos",
+      rows: getEventExportRows(timeline)
+    },
+    {
+      name: "Agentes",
+      rows: getAgentSummaryExportRows(timeline)
+    }
+  ]);
+  const blob = new Blob([workbook], {
+    type: "application/vnd.ms-excel;charset=utf-8"
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+
+  link.href = url;
+  link.download = `timeline-jira-${timeline.date || getTodayInputValue()}.xls`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function getOverviewExportRows(timeline) {
+  const totals = timeline.totals || {};
+  const reportTotals = timeline.dailyReport?.totals || {};
+
+  return [
+    ["Campo", "Valor"],
+    ["Fecha", timeline.date || ""],
+    ["Zona horaria", timeline.timeZone || PERU_TIME_ZONE],
+    ["Generado", formatExportDateTime(timeline.generatedAt)],
+    ["Periodo reporte", timeline.dailyReport?.period?.label || ""],
+    ["Agentes controlados", totals.agents ?? (timeline.agents || []).length],
+    ["Tickets buscados", totals.searchedIssues ?? ""],
+    ["Tickets con cambios", totals.issues ?? ""],
+    ["Cambios de estado", totals.statusChanges ?? totals.events ?? ""],
+    ["Promedio entre cambios (min)", totals.averageStatusMinutes ?? ""],
+    ["Asignados hoy", reportTotals.today?.assigned ?? ""],
+    ["Resueltos hoy", reportTotals.today?.resolved ?? ""],
+    ["Pendientes del periodo anterior", reportTotals.previous?.assigned ?? ""],
+    ["Resueltos del periodo anterior", reportTotals.previous?.resolved ?? ""],
+    ["Abiertos al corte", reportTotals.openTickets ?? ""],
+    ["Seguimiento al corte", reportTotals.followUpTickets ?? ""],
+    ["Pendientes al corte", reportTotals.pendingTickets ?? ""]
+  ];
+}
+
+function getTicketExportRows(timeline) {
+  const ticketMap = new Map();
+  const periodLabel = timeline.dailyReport?.period?.label || "";
+
+  for (const agent of timeline.agents || []) {
+    const eventsByIssue = groupEventsByIssue(agent.events || []);
+
+    for (const [issueKey, events] of eventsByIssue) {
+      const firstEvent = events[0];
+      const lastEvent = events.at(-1);
+
+      upsertTicketExport(ticketMap, {
+        agentId: agent.id,
+        agentName: agent.name,
+        firstChange: firstEvent?.time || "",
+        key: issueKey,
+        lastChange: lastEvent?.time || "",
+        source: "Timeline",
+        statusChangeCount: events.length,
+        summary: firstEvent?.summary || "",
+        url: firstEvent?.issueUrl || ""
+      });
+    }
+
+    for (const issue of agent.issues || []) {
+      upsertTicketExport(ticketMap, {
+        agentId: agent.id,
+        agentName: agent.name,
+        key: issue.key,
+        source: "Timeline",
+        status: issue.status,
+        summary: issue.summary,
+        url: issue.url
+      });
+    }
+  }
+
+  for (const agent of timeline.dailyReport?.agents || []) {
+    const tickets = [
+      ...(agent.todayTickets || []),
+      ...(agent.previousTickets || [])
+    ];
+
+    for (const ticket of tickets) {
+      upsertTicketExport(ticketMap, {
+        agentId: ticket.agentId || agent.id,
+        agentName: ticket.agentName || agent.name,
+        assignedAt: formatExportDateTime(ticket.assignedAt),
+        category: ticket.category === "previous" ? "Previo" : "Hoy",
+        key: ticket.key,
+        period: periodLabel,
+        resolved: ticket.resolved ? "Si" : "No",
+        resolvedAt: formatExportDateTime(ticket.resolvedAt),
+        source: "Reporte diario",
+        status: ticket.status,
+        summary: ticket.summary,
+        url: ticket.url
+      });
+    }
+  }
+
+  return [
+    [
+      "Fecha",
+      "Periodo",
+      "Agente",
+      "ID agente",
+      "Ticket",
+      "Resumen",
+      "Estado",
+      "Fuente",
+      "Categoria",
+      "Resuelto",
+      "Asignado",
+      "Resolucion",
+      "Primer cambio",
+      "Ultimo cambio",
+      "Cambios estado",
+      "URL"
+    ],
+    ...Array.from(ticketMap.values())
+      .sort(compareTicketExportRows)
+      .map((ticket) => [
+        timeline.date || "",
+        ticket.period || periodLabel,
+        ticket.agentName || "",
+        ticket.agentId || "",
+        ticket.key || "",
+        ticket.summary || "",
+        ticket.status || "",
+        (ticket.sources || []).join(", "),
+        ticket.category || "",
+        ticket.resolved || "",
+        ticket.assignedAt || "",
+        ticket.resolvedAt || "",
+        ticket.firstChange || "",
+        ticket.lastChange || "",
+        ticket.statusChangeCount ?? "",
+        ticket.url || ""
+      ])
+  ];
+}
+
+function getEventExportRows(timeline) {
+  const events = (timeline.agents || [])
+    .flatMap((agent) =>
+      (agent.events || []).map((event) => ({
+        ...event,
+        agentId: agent.id,
+        agentName: agent.name
+      }))
+    )
+    .sort((first, second) => new Date(first.at) - new Date(second.at));
+
+  return [
+    [
+      "Fecha",
+      "Hora",
+      "Agente",
+      "ID agente",
+      "Autor",
+      "Ticket",
+      "Resumen",
+      "Desde",
+      "Hacia",
+      "Tipo",
+      "URL"
+    ],
+    ...events.map((event) => [
+      timeline.date || "",
+      event.time || formatTimeValue(event.at),
+      event.agentName || "",
+      event.agentId || "",
+      event.authorName || "",
+      event.issueKey || "",
+      event.summary || "",
+      event.from || "",
+      event.to || "",
+      event.type || "",
+      event.issueUrl || ""
+    ])
+  ];
+}
+
+function getAgentSummaryExportRows(timeline) {
+  return [
+    [
+      "Fecha",
+      "Agente",
+      "ID agente",
+      "Tickets",
+      "Cambios estado",
+      "Primera actividad",
+      "Ultima actividad",
+      "Cadencia",
+      "Promedio minutos"
+    ],
+    ...(timeline.agents || []).map((agent) => [
+      timeline.date || "",
+      agent.name || "",
+      agent.id || "",
+      (agent.issues || []).length,
+      agent.statusChangeCount || 0,
+      agent.firstActivity || "",
+      agent.lastActivity || "",
+      agent.cadenceLabel || "",
+      agent.averageStatusMinutes ?? ""
+    ])
+  ];
+}
+
+function groupEventsByIssue(events) {
+  const grouped = new Map();
+
+  for (const event of events) {
+    if (!event.issueKey) {
+      continue;
+    }
+
+    if (!grouped.has(event.issueKey)) {
+      grouped.set(event.issueKey, []);
+    }
+
+    grouped.get(event.issueKey).push(event);
+  }
+
+  for (const issueEvents of grouped.values()) {
+    issueEvents.sort((first, second) => new Date(first.at) - new Date(second.at));
+  }
+
+  return grouped;
+}
+
+function upsertTicketExport(ticketMap, ticket) {
+  const exportKey = `${ticket.agentId || ""}:${ticket.key || ""}`;
+  const current = ticketMap.get(exportKey) || {
+    agentId: ticket.agentId,
+    agentName: ticket.agentName,
+    key: ticket.key,
+    sources: []
+  };
+
+  for (const [key, value] of Object.entries(ticket)) {
+    if (key === "source" || isEmptyExportValue(value)) {
+      continue;
+    }
+
+    if (isEmptyExportValue(current[key])) {
+      current[key] = value;
+    }
+  }
+
+  if (ticket.source && !current.sources.includes(ticket.source)) {
+    current.sources.push(ticket.source);
+  }
+
+  ticketMap.set(exportKey, current);
+}
+
+function compareTicketExportRows(first, second) {
+  return (
+    (first.agentName || "").localeCompare(second.agentName || "") ||
+    compareIssueKeys(first.key || "", second.key || "")
+  );
+}
+
+function isEmptyExportValue(value) {
+  return value == null || value === "";
+}
+
+function formatExportDateTime(value) {
+  if (!value) {
+    return "";
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  return new Intl.DateTimeFormat("es-PE", {
+    dateStyle: "short",
+    timeStyle: "short",
+    timeZone: PERU_TIME_ZONE
+  }).format(date);
+}
+
+function createExcelWorkbook(sheets) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+  xmlns:o="urn:schemas-microsoft-com:office:office"
+  xmlns:x="urn:schemas-microsoft-com:office:excel"
+  xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"
+  xmlns:html="http://www.w3.org/TR/REC-html40">
+  <Styles>
+    <Style ss:ID="Header">
+      <Font ss:Bold="1" />
+      <Interior ss:Color="#D9EAF7" ss:Pattern="Solid" />
+    </Style>
+  </Styles>
+  ${sheets.map(createExcelWorksheet).join("")}
+</Workbook>`;
+}
+
+function createExcelWorksheet(sheet) {
+  return `<Worksheet ss:Name="${escapeXml(getExcelSheetName(sheet.name))}">
+    <Table>
+      ${(sheet.rows || []).map(createExcelRow).join("")}
+    </Table>
+  </Worksheet>`;
+}
+
+function createExcelRow(row, rowIndex) {
+  const isHeader = rowIndex === 0;
+
+  return `<Row>${row
+    .map((cell) => createExcelCell(cell, isHeader))
+    .join("")}</Row>`;
+}
+
+function createExcelCell(value, isHeader) {
+  const isNumber = typeof value === "number" && Number.isFinite(value);
+  const type = isNumber ? "Number" : "String";
+  const data = isNumber ? String(value) : escapeXml(getExcelCellText(value));
+  const style = isHeader ? ' ss:StyleID="Header"' : "";
+
+  return `<Cell${style}><Data ss:Type="${type}">${data}</Data></Cell>`;
+}
+
+function getExcelCellText(value) {
+  return String(value ?? "").replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "");
+}
+
+function getExcelSheetName(name) {
+  const safeName = String(name || "Hoja").replace(/[\\/?*\[\]:]/g, " ").trim();
+
+  return (safeName || "Hoja").slice(0, 31);
+}
+
+function escapeXml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
 }
 
 function getSlaRateClassName(value) {
